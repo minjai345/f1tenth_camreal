@@ -1,0 +1,22 @@
+# Instructor copies this to data/config/vehicle.yaml once per car.
+# Model, calibration and image topic are read from camreal_config (the students' data/camreal.yaml).
+camsim_driver_node:
+  ros__parameters:
+    camreal_config: data/camreal.yaml  # relative to the repository root (launch from there)
+    image_qos_reliability: best_effort # sensor QoS, volatile, KEEP_LAST depth 1
+    path_topic: /predicted_path        # rear axle -> predicted waypoint, for RViz
+    drive_topic: /drive                # ackermann_mux navigation input
+    debug_image_topic: /camsim_driver/bev  # BEV the model sees + waypoint; '' disables
+    debug_image_hz: 5.0
+    device: cuda                       # onnxruntime CUDA: ResNet-18 ~10 ms/frame on the Jetson. cpu is too slow to drive
+    cpu_threads: 1                     # onnxruntime CPU threads
+    control_hz: 25.0
+    input_timeout_s: 0.25
+    path_timeout_s: 0.25
+    future_tolerance_s: 0.02
+    target_speed_mps: 0.5              # constant; the model only gives the steering target
+    wheelbase_m: 0.0                   # REQUIRED: measure; invalid until configured
+    steer_max_rad: 0.30
+    max_waypoint_m: 3.0                # reject predictions farther than this (model aims at ahead_m)
+    path_frame: rear_axle
+    drive_enabled: false               # launch argument drive_enabled:=true overrides

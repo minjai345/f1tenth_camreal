@@ -11,5 +11,10 @@ __pycache__
 /model.pt
 /model.onnx
 
+# camreal: 실차 rosbag·라벨·모델·차량 설정 (로컬 전용), ROS 빌드 산출물
+/data/
+/install/
+/log/
+
 # 발표자료 (바이너리. 레포에 넣으면 clone 할 때마다 받아야 한다)
 *.pptx

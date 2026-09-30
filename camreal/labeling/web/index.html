@@ -1,0 +1,15 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>Camreal waypoint 라벨링</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#121722;color:#edf1f8;font:15px system-ui,sans-serif}header{padding:14px 24px;background:#1d2635;display:flex;align-items:center;gap:20px;flex-wrap:wrap}h1{font-size:20px;margin:0}main{padding:16px 24px}button,input,select,textarea{font:inherit;border:1px solid #526078;background:#263348;color:#fff;padding:8px;border-radius:5px}button{cursor:pointer}button:hover{background:#3b506d}.tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}.layout{display:grid;grid-template-columns:minmax(320px,1fr) minmax(300px,1fr);gap:20px}.pane{background:#1d2635;padding:16px;border-radius:8px}h2{font-size:16px;margin:0 0 12px}canvas{display:block;max-width:100%;max-height:72vh;width:auto;height:auto;touch-action:none;cursor:crosshair;background:#242a35}#raw{max-width:100%;max-height:36vh}p{line-height:1.6;color:#bac7da}#feedback{white-space:pre-wrap;color:#ffc76b;min-height:24px}#status{color:#85d9b9}#counts{color:#bac7da}textarea{display:block;width:100%;height:56px;margin:10px 0}.accept{background:#246b54}.reject{background:#713944}kbd{border:1px solid #526078;border-radius:4px;padding:0 5px;background:#263348}#warning{background:#6b4b16;color:#ffe1a8;padding:8px 24px}#details{font:12px monospace;overflow-wrap:anywhere}@media(max-width:800px){.layout{grid-template-columns:1fr}}
+</style>
+<header><h1>Camreal waypoint 라벨링</h1><span id="session"></span><span id="status"></span><span id="counts"></span></header>
+<div id="warning" hidden></div>
+<main><div class="tools"><button id="prev">← 이전</button><select id="frames" aria-label="프레임"></select><button id="next">다음 →</button><button id="todo">다음 미작업</button></div>
+<div class="layout"><section class="pane"><h2>BEV (위가 전방, 왼쪽이 차량 좌측)</h2><canvas id="canvas"></canvas>
+<p id="instructions"></p></section>
+<section class="pane"><h2>원본 카메라 영상</h2><img id="raw" alt="현재 프레임의 원본 카메라 영상"><p id="details"></p>
+<textarea id="note" aria-label="검토 메모" placeholder="메모 / 제외 사유 (선택)"></textarea>
+<div class="tools"><button id="accept" class="accept">승인 <kbd>Enter</kbd></button><button id="reject" class="reject">제외 <kbd>X</kbd></button></div>
+<p id="feedback" role="status"></p>
+<p><kbd>←</kbd> <kbd>→</kbd> 프레임 이동. 저장하면 다음 프레임으로 넘어갑니다.<br>승인한 프레임만 데이터셋에 들어갑니다. 차선 중앙을 확신할 수 없으면 제외하세요.</p></section></div></main>
+<script src="/app.js"></script></html>

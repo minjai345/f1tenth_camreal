@@ -1,0 +1,51 @@
+# ASSUMED calibration: preview only, NOT measured. Drive output is blocked.
+schema_version: 1
+calibration_status: assumed
+assumptions:
+  hfov_deg: 90.0
+  camera_height_m: 0.2
+  pitch_deg: 0.0
+  offset_x_m: 0.0
+  distortion: zero, NOT measured
+  purpose: pipeline preview only; replace with Week 1 calibration
+distortion_model: plumb_bob
+image_width: 1920
+image_height: 1200
+K:
+- - 960.0000000000001
+  - 0.0
+  - 960.0
+- - 0.0
+  - 960.0000000000001
+  - 600.0
+- - 0.0
+  - 0.0
+  - 1.0
+D:
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+new_K:
+- - 960.0000000000001
+  - 0.0
+  - 960.0
+- - 0.0
+  - 960.0000000000001
+  - 600.0
+- - 0.0
+  - 0.0
+  - 1.0
+homography_space: undistorted_full_resolution
+H_i2g:
+- - 6.777199489672964e-17
+  - 0.0
+  - 1496.684669527954
+- - -1.5590465307582848
+  - 0.0
+  - 1496.6846695279535
+- - 2.1974181263503753e-17
+  - 7.795232653791425
+  - -4677.139592274856
+ground_frame: rear_axle

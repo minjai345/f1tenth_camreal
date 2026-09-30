@@ -1,0 +1,14 @@
+# camreal 설정. 경로는 저장소 폴더(~/f1tenth_gym) 기준
+model: data/models/sim                   # 주행에 쓸 모델 (model.onnx + checkpoint.json)
+calibration: data/calibration/car.yaml   # 이 차 카메라 캘리브레이션
+image_topic: /flir_camera/image_raw
+paths:
+  bags: data/bags
+  projects: data/labeling
+  datasets: data/datasets
+sessions:                                # 기록한 주행 이름. train과 val은 서로 다른 주행
+  train: [run_train]
+  val: [run_val]
+sampling:
+  interval_s: 0.5
+  max_frames: 1000

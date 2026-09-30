@@ -1,0 +1,11 @@
+# Deliberately incomplete. Replace nulls with measured values; this cannot enable driving.
+schema_version: 1
+distortion_model: plumb_bob
+image_width: 1920  # EXAMPLE reference resolution; must match actual Image exactly
+image_height: 1200
+K: null           # 3x3 intrinsics of raw full-resolution camera
+D: null           # OpenCV [k1,k2,p1,p2,k3] (4/5/8/12/14 coefficients supported)
+new_K: null       # 3x3 intrinsics used for the full-resolution undistorted image
+homography_space: undistorted_full_resolution
+H_i2g: null       # 3x3: undistorted pixel -> rear-axle ground (x forward,y left) metres
+ground_frame: rear_axle
