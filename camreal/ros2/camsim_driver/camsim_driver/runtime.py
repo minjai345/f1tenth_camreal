@@ -1,11 +1,8 @@
 """ROS-independent state: latest-frame mailbox (waypoint_node) and fail-closed follower (pure_pursuit_node)."""
 from dataclasses import dataclass
 from threading import Condition, RLock
-import cv2
 import numpy as np
 from camsim.pure_pursuit import pure_pursuit
-
-MIN_EDGE, EDGE_PER_NOISE = 2.5, .5   # see ImageCheck
 
 
 @dataclass(frozen=True)
@@ -21,45 +18,9 @@ def valid_waypoint(wp, max_waypoint_m):
     return bool(wp.shape == (2,) and np.isfinite(wp).all() and wp[0] > 0 and np.hypot(*wp) <= max_waypoint_m)
 
 
-class ImageCheck:
-    """The model outputs a point even for a covered lens, so it only runs on a view with tape-scale edges.
-
-    Auto exposure turns a covered lens into smooth shading plus amplified noise, which a mean/std test takes for an
-    image. Edge = RMS of (10 cm box blur - 40 cm box blur) over the visible BEV, uint8 levels; some channel has to
-    reach MIN_EDGE (shading measures ~1) and EDGE_PER_NOISE x its pixel noise (noise alone ~0.3). Tape: ~10.
-    """
-
-    def __init__(self, mask, resolution_m):
-        self.small, self.large = (2 * round(width / resolution_m / 2) + 1 for width in (.10, .40))
-        # The floor colour filled in outside the mask must not count as an edge.
-        self.region = cv2.erode(mask.astype(np.uint8), np.ones((self.large + 2,) * 2, np.uint8))
-        if not self.region.any():
-            raise ValueError('학습 BEV에서 카메라가 보는 영역이 너무 좁아 영상 검사를 할 수 없습니다. '
-                             '캘리브레이션(H_i2g)을 확인하세요.')
-
-    def __call__(self, bev):
-        """None = edges in view; otherwise why the frame gets no waypoint."""
-        f = bev.astype(np.float32)
-        band = cv2.blur(f, (self.small,) * 2) - cv2.blur(f, (self.large,) * 2)
-        edge = np.sqrt(cv2.mean(band * band, mask=self.region)[:3])
-        noise = 1.25 * np.array(cv2.mean(np.abs(f - cv2.blur(f, (3, 3))), mask=self.region)[:3])   # ~ its std
-        need = np.maximum(MIN_EDGE, EDGE_PER_NOISE * noise)
-        c = np.argmax(edge / need)
-        return None if edge[c] >= need[c] else f'no edges in view (edge {edge[c]:.1f} < {need[c]:.1f})'
-
-
-def calibration_problem(reported, sha256):
-    """waypoint_node's '<calibration_status> <sha256>' vs. the file checked here; None = may drive."""
-    status, _, reported_sha256 = reported.partition(' ')
-    if status == 'assumed':
-        return 'waypoint_node uses an ASSUMED calibration'
-    if reported_sha256 != sha256:
-        return 'waypoint_node calibration differs from camreal_config'
-    return None
-
-
 class FrameMailbox:
-    """Newest image only; a failed, invalid or expired result invalidates every frame queued before it."""
+    """Newest image only; a failed, invalid or expired result invalidates every frame queued before it.
+    reason is drawn on the debug BEV with cv2.putText, so it stays ASCII."""
 
     def __init__(self, input_timeout, future_tolerance, max_waypoint_m):
         if any(not np.isfinite(v) or v <= 0 for v in (input_timeout, max_waypoint_m)):
@@ -87,7 +48,7 @@ class FrameMailbox:
             elif ros_now - stamp < -self.future_tolerance:
                 reason = 'future image timestamp'
             elif self.last_stamp is not None and stamp <= self.last_stamp:
-                reason = 'non-increasing image timestamp (bag/시계를 되감았으면 노드를 다시 시작)'
+                reason = 'non-increasing image timestamp'
             else:
                 self.last_stamp = stamp
                 self.pending = Frame(message, stamp, now, self.epoch)

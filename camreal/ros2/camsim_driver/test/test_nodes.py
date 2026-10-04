@@ -1,7 +1,7 @@
 """In-process ROS check: image -> waypoint_node -> /waypoint -> pure_pursuit_node -> /drive; the real entry point
 in a subprocess for startup errors and stop signals.
 
-Test-only topic names and a random DDS domain keep it away from a live ackermann_mux.
+Test-only topic names and DDS domains outside the car ids keep it away from a live ackermann_mux.
 """
 from contextlib import contextmanager
 import importlib.util
@@ -29,14 +29,11 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PointStamped
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
 from camsim import camera, config
-from camsim.handoff import sha256_file
 from camsim.pure_pursuit import pure_pursuit
 from camreal.tests.conftest import make_model_dir, tape_lane
-from camsim_driver.messages import CALIBRATION_TOPIC, LATCHED, make_waypoint
+from camsim_driver.messages import make_waypoint
 from camsim_driver.params import PURE_PURSUIT_NODE, WAYPOINT_NODE
-from camsim_driver import waypoint_node
 from camsim_driver.pure_pursuit_node import PurePursuitNode
 from camsim_driver.waypoint_node import WaypointNode
 
@@ -44,20 +41,14 @@ WP, NORM = (1., .2), 2.   # the test model predicts WP for every image
 IMAGE, WAYPOINT, DRIVE = '/test/image', '/test/waypoint', '/test/drive'
 RNG = np.random.default_rng(0)
 TRACK = np.clip(tape_lane(config.load()) + RNG.normal(0, 2, (400, 640, 3)), 0, 255).astype(np.uint8)
-YY, XX = np.mgrid[:400, :640] - np.array([200, 320])[:, None, None]
-SHADING = .7 + .3 / (1 + (XX ** 2 + YY ** 2) / 320 ** 2)[..., None] ** 2   # 30 % cos^4 lens shading
-COVERED = {   # auto exposure brightens a covered lens: noise and smooth shading, no edges
-    'black frame': np.zeros_like(TRACK),
-    'covered, auto gain': np.clip(RNG.normal(20, 10, TRACK.shape), 0, 255).astype(np.uint8),
-    'palm, auto exposure': np.clip(np.array([70, 95, 140]) * SHADING + RNG.normal(0, 2, TRACK.shape), 0, 255
-                                   ).astype(np.uint8)}
 ROOT = Path(__file__).resolve().parents[4]
 
 
 @pytest.fixture
 def context():
     context = Context()
-    rclpy.init(context=context, domain_id=random.randint(30, 101))   # Linux-safe ports, never the car's 0
+    # Linux-safe DDS ports outside the car ids 1-101 (CAR_STACK.md step 7): no car's /drive or /joy.
+    rclpy.init(context=context, domain_id=random.randint(215, 232))
     yield context
     rclpy.try_shutdown(context=context)
 
@@ -98,14 +89,12 @@ class Harness(Node):
     def __init__(self, context, image=None, waypoint=None):
         super().__init__('harness', context=context)
         self.lock = threading.Lock()
-        self.streaming, self.stamps, self.waypoints, self.drives, self.calibrations = True, set(), [], [], []
+        self.streaming, self.stamps, self.waypoints, self.drives = True, set(), [], []
         self.image = None if image is None else CvBridge().cv2_to_imgmsg(image, encoding='bgr8')
-        self.waypoint, self.calibration_pub = waypoint, None
+        self.waypoint = waypoint
         if image is not None:
             self.image_pub = self.create_publisher(Image, IMAGE, 1)
             self.create_subscription(PointStamped, WAYPOINT, lambda m: self.record(self.waypoints, m), 50)
-            self.create_subscription(String, CALIBRATION_TOPIC, lambda m: self.record(self.calibrations, m),
-                                     LATCHED)
         if waypoint is not None:
             self.waypoint_pub = self.create_publisher(PointStamped, WAYPOINT, 1)
         self.create_subscription(AckermannDriveStamped, DRIVE, lambda m: self.record(self.drives, m), 200)
@@ -126,11 +115,6 @@ class Harness(Node):
                 self.image_pub.publish(self.image)
             if self.waypoint is not None:
                 self.waypoint_pub.publish(make_waypoint(stamp, 'rear_axle', self.waypoint))
-
-    def publish_calibration(self, text):
-        if self.calibration_pub is None:
-            self.calibration_pub = self.create_publisher(String, CALIBRATION_TOPIC, LATCHED)
-        self.calibration_pub.publish(String(data=text))
 
     def stream(self, on):
         with self.lock:
@@ -200,7 +184,6 @@ def test_image_to_waypoint_to_drive_and_stop(tmp_path, context):
     try:
         start = time.monotonic()
         assert wait_for(lambda: time.monotonic() - start > 1.5 and len(moving(start)) >= 10, 20.)
-        assert [m.data for _, m in harness.calibrations] == [f'measured {sha256_file(tmp_path/"camera.yaml")}']
         waypoints = harness.since(harness.waypoints, start)
         assert waypoints
         for _, msg in waypoints:
@@ -256,61 +239,21 @@ def test_image_to_waypoint_to_drive_and_stop(tmp_path, context):
             node.destroy_node()
 
 
-@pytest.mark.parametrize('case', [*COVERED, 'point behind'])
-def test_no_waypoint_and_only_zero_drive(tmp_path, context, case):
-    wp, image, reason = ((WP, COVERED[case], 'no edges in view') if case in COVERED
-                         else ((-1., .2), TRACK, 'invalid waypoint output'))
-    model, cfg, _ = make_model_dir(tmp_path, lambda net: constant_head(net, wp), waypoints__norm_m=NORM)
+def test_point_behind_gives_no_waypoint_and_only_zero_drive(tmp_path, context):
+    model, cfg, _ = make_model_dir(tmp_path, lambda net: constant_head(net, (-1., .2)), waypoints__norm_m=NORM)
     course = write_course(tmp_path, model, cfg)
-    harness = Harness(context, image=image)
+    harness = Harness(context, image=TRACK)
     perception = WaypointNode(context=context, parameter_overrides=params(
         camreal_config=str(course), device='cpu', waypoint_topic=WAYPOINT,
         path_topic='/test/predicted_path', debug_image_topic='/test/bev'))
     control = PurePursuitNode(context=context, parameter_overrides=params(
         camreal_config=str(course), drive_enabled=True, wheelbase_m=.3, waypoint_topic=WAYPOINT, drive_topic=DRIVE))
     with spinning(context, [perception, control], harness):
-        assert wait_for(lambda: perception.mailbox.reason.startswith(reason), 20.)
+        assert wait_for(lambda: perception.mailbox.reason == 'invalid waypoint output', 20.)
         start = time.monotonic()
         assert wait_for(lambda: len(harness.since(harness.drives, start)) >= 25, 5.)
         assert not harness.waypoints
         assert all(m.drive.speed == 0 and m.drive.steering_angle == 0 for _, m in harness.since(harness.drives, 0))
-
-
-def test_drive_waits_for_the_calibration_waypoint_node_loaded(tmp_path, context):
-    course = write_course(tmp_path, tmp_path/'model', config.load())
-    sha = sha256_file(tmp_path/'camera.yaml')
-    harness = Harness(context, waypoint=WP)
-    control = PurePursuitNode(context=context, parameter_overrides=params(
-        camreal_config=str(course), drive_enabled=True, wheelbase_m=.3, waypoint_topic=WAYPOINT, drive_topic=DRIVE))
-    moving = lambda start: [m for _, m in harness.since(harness.drives, start) if m.drive.speed > 0]
-    with spinning(context, [control], harness):
-        start = time.monotonic()
-        assert wait_for(lambda: len(harness.since(harness.drives, start)) >= 10, 5.)
-        assert not moving(start) and control.follower.reason == 'waiting for waypoint_node calibration'
-        # e.g. waypoint_node started before `calibrate` rewrote the file, or with another camreal_config
-        for text, reason in ((f'measured {"0" * 64}', 'differs'), (f'assumed {sha}', 'ASSUMED')):
-            harness.publish_calibration(text)
-            assert wait_for(lambda: reason in control.follower.reason, 5.)
-            start = time.monotonic()
-            assert wait_for(lambda: len(harness.since(harness.drives, start)) >= 5, 2.) and not moving(start)
-        matched = time.monotonic()
-        harness.publish_calibration(f'measured {sha}')
-        assert wait_for(lambda: moving(matched), 5.)
-
-
-def test_calibration_saved_while_waypoint_node_reads_it_is_refused(tmp_path, context, monkeypatch):
-    """The announced SHA-256 must describe the H_i2g in use, or a later pure_pursuit_node drives on a stale one."""
-    model, cfg, _ = make_model_dir(tmp_path, constant_head, waypoints__norm_m=NORM)
-    course = write_course(tmp_path, model, cfg)
-    load = waypoint_node.CameraPreprocessor
-
-    def calibrate_saves_meanwhile(path, *args):
-        preprocessor = load(path, *args)
-        Path(path).write_text(Path(path).read_text() + '# saved by calibrate\n')
-        return preprocessor
-    monkeypatch.setattr(waypoint_node, 'CameraPreprocessor', calibrate_saves_meanwhile)
-    with pytest.raises(ValueError, match='읽는 동안 바뀌었습니다'):
-        WaypointNode(context=context, parameter_overrides=params(camreal_config=str(course), device='cpu'))
 
 
 def test_final_zero_waits_until_subscribers_have_it(tmp_path, context):
@@ -348,7 +291,8 @@ def test_control_startup_errors_name_the_parameter(context, values, match):
 @pytest.mark.parametrize('values,match', [
     (dict(waypoint_topic=''), 'waypoint_topic 값이 비었습니다'),
     (dict(image_qos_reliability='fast'), 'image_qos_reliability=fast: best_effort 또는 reliable'),
-    (dict(input_timeout_s=0.), 'input_timeout_s=0.0: 0보다 큰'), (dict(future_tolerance_s=-1.), 'future_tolerance_s')])
+    (dict(input_timeout_s=0.), 'input_timeout_s=0.0: 0보다 큰'), (dict(future_tolerance_s=-1.), 'future_tolerance_s'),
+    (dict(device='gpu'), 'device=gpu: cpu 또는 cuda로')])
 def test_perception_startup_errors_name_the_parameter(context, values, match):
     with pytest.raises(ValueError, match=match):
         WaypointNode(context=context, parameter_overrides=params(**values))
@@ -360,8 +304,6 @@ def test_drive_disabled_reads_no_course_and_has_no_drive_publisher(context):
     try:
         topics = [name for name, _ in node.get_publisher_names_and_types_by_node('pure_pursuit_node', '/')]
         assert '/drive' not in topics
-        topics = [name for name, _ in node.get_subscriber_names_and_types_by_node('pure_pursuit_node', '/')]
-        assert CALIBRATION_TOPIC not in topics
     finally:
         node.destroy_node()
 
@@ -397,6 +339,25 @@ def test_launch_checks_vehicle_yaml_and_gives_drive_only_to_the_controller(tmp_p
 
 
 CONTROLLER = [sys.executable, '-c', 'from camsim_driver.pure_pursuit_node import main; main()']
+# Each line run inside the SIGINT handler raises the next SIGINT (6 at most): a handler that takes a lock, such as
+# threading.Event.set, deadlocks on the nested one.
+NESTING_CONTROLLER = [sys.executable, '-c', '''
+import signal, sys
+from camsim_driver.pure_pursuit_node import main
+raised = []
+def nest(frame, event, arg):
+    code, f = getattr(signal.getsignal(signal.SIGINT), "__code__", None), frame
+    while f is not None and f.f_code is not code:
+        f = f.f_back
+    if f is None or len(raised) >= 6:
+        return None
+    if event == "line":
+        raised.append(event)
+        signal.raise_signal(signal.SIGINT)
+    return nest
+sys.settrace(nest)
+main()
+''']
 
 
 def test_startup_setting_error_prints_the_fix_without_a_traceback(context):
@@ -412,17 +373,16 @@ ORPHANING_PARENT = [sys.executable, '-c', 'import subprocess, sys, time; p = sub
                     'stdout=sys.stderr); print(p.pid, flush=True); time.sleep(60)']
 
 
-@pytest.mark.parametrize('how', ['SIGINT twice', 'SIGINT until it exits', 'SIGHUP', 'parent killed'])
+@pytest.mark.parametrize('how', ['SIGINT twice', 'SIGINT until it exits', 'nested SIGINT', 'SIGHUP', 'parent killed'])
 def test_stop_signal_or_dead_parent_sends_the_final_zero(tmp_path, context, how):
     """The real entry point (spin.run), started the way ros2 launch and ros2 run start it."""
     course = write_course(tmp_path, tmp_path/'model', config.load())
     harness = Harness(context, waypoint=WP)
-    harness.publish_calibration(f'measured {sha256_file(tmp_path/"camera.yaml")}')
     recorder = SingleThreadedExecutor(context=context)
     recorder.add_node(harness)
     thread = spin(recorder)
-    orphaned = how == 'parent killed'
-    command = (ORPHANING_PARENT if orphaned else []) + CONTROLLER + [
+    orphaned, controller = how == 'parent killed', NESTING_CONTROLLER if how == 'nested SIGINT' else CONTROLLER
+    command = (ORPHANING_PARENT if orphaned else []) + controller + [
         '--ros-args', '-p', f'camreal_config:={course}', '-p', 'drive_enabled:=true', '-p', 'wheelbase_m:=0.3',
         '-p', f'waypoint_topic:={WAYPOINT}', '-p', f'drive_topic:={DRIVE}']
     log_path = tmp_path/'node.log'
@@ -441,6 +401,8 @@ def test_stop_signal_or_dead_parent_sends_the_final_zero(tmp_path, context, how)
             while process.poll() is None:
                 process.send_signal(signal.SIGINT)
                 time.sleep(.002)
+        elif how == 'nested SIGINT':
+            process.send_signal(signal.SIGINT)
         else:
             process.send_signal(signal.SIGKILL if orphaned else signal.SIGHUP)
         if not orphaned:

@@ -66,21 +66,28 @@ def test_preprocessing_matches_explicit_predictor_pipeline(model_folder, tmp_pat
     np.testing.assert_allclose(predictor.predict_camera(undistorted, pre.H),
                                predictor.predict(render.ipm_bev(undistorted, pre.H, cfg)))
     assert np.all(pre.bev(raw)[~mask] == cfg.lane.color_floor)
-    with pytest.raises(ValueError, match='resolution'):
+    # No resize/crop: the error names both sizes and the three fixes.
+    with pytest.raises(ValueError, match=r'영상 해상도\(320x200\)와 캘리브레이션 해상도\(640x400\)가 다릅니다.* '
+                                         r'1\) 카메라 해상도를 640x400에 맞추기 '
+                                         r'2\) 320x200에서 1주차 방식으로 다시 캘리브레이션.* '
+                                         r'3\) 카메라 해상도를 1920x1200에 맞추고 .*'
+                                         r'--ost camreal/config/ost_reference_1920x1200\.yaml'):
         pre.bev(raw[::2, ::2])
-    with pytest.raises(ValueError, match='ground_frame'):
+    with pytest.raises(ValueError, match=r'ground_frame\(rear_axle\)과 path_frame\(base_link\)이 같아야'):
         CameraPreprocessor(path, cfg, mask, 'base_link')
 
 
-@pytest.mark.parametrize('field,value', [('H_i2g', [[0, 0, 0]] * 3),
-                                        ('D', [float('nan')] * 5),
-                                        ('homography_space', 'raw_distorted')])
-def test_bad_calibration_rejected(model_folder, tmp_path, field, value):
+@pytest.mark.parametrize('field,value,match', [
+    ('H_i2g', [[0, 0, 0]] * 3, 'H_i2g는 유한하고 역행렬이 있는 3x3'), ('D', [float('nan')] * 5, r'D\(왜곡 계수\)'),
+    ('homography_space', 'raw_distorted', '왜곡 보정된 원본 해상도'), ('image_width', 0, 'image_width'),
+    ('distortion_model', 'equidistant', r'plumb_bob인 캘리브레이션 파일이어야 합니다\(지금 1, equidistant\)')],
+    ids=['H_i2g', 'D', 'homography_space', 'image_width', 'distortion_model'])
+def test_bad_calibration_rejected(model_folder, tmp_path, field, value, match):
     _, cfg, _ = model_folder
     path, data = calibration(tmp_path, cfg)
     data[field] = value
     path.write_text(yaml.safe_dump(data))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=match):
         CameraPreprocessor(path, cfg, training_mask(cfg), 'rear_axle')
 
 

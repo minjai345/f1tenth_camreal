@@ -2,7 +2,6 @@
 import ctypes
 import os
 import signal
-import threading
 import rclpy
 from rclpy.signals import SignalHandlerOptions
 
@@ -11,20 +10,21 @@ def run(node_class, make_executor, failure, args=None):
     # rclpy's own handlers shut the context down before destroy_node (the final stop could not be sent),
     # and the second SIGINT forwarded by ros2 launch raised KeyboardInterrupt inside destroy_node.
     # SIGHUP: the terminal or SSH session closed. SIGQUIT: Ctrl+\.
-    stop, signals = threading.Event(), (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+    # The flag is a list: append takes no lock, Event.set does and deadlocks on a signal nested inside it.
+    stop, signals = [], (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
     for signum in signals:
-        signal.signal(signum, lambda *_: stop.set())
+        signal.signal(signum, lambda signum, _: stop.append(signum))
     # PR_SET_PDEATHSIG: a parent that dies without signalling us (ros2 launch after SIGTERM, SIGKILL) sends SIGTERM.
     parent = os.getppid()
     ctypes.CDLL(None).prctl(1, ctypes.c_ulong(signal.SIGTERM))
     if os.getppid() != parent:
-        stop.set()
+        stop.append(signal.SIGTERM)
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node, executor = None, make_executor()
     try:
         node = node_class()
         executor.add_node(node)
-        while rclpy.ok() and not stop.is_set():
+        while rclpy.ok() and not stop:
             executor.spin_once(timeout_sec=0.1)
     except Exception as exc:
         if node is None:

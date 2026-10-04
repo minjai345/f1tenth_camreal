@@ -1,12 +1,7 @@
-"""ROS image conversion, the hand-off between the two nodes, and visualization messages."""
+"""ROS image conversion, the /waypoint hand-off between the two nodes, and visualization messages."""
 import numpy as np
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PointStamped, PoseStamped
-
-# waypoint_node's std_msgs/String '<calibration_status> <sha256 of the file>'; late subscribers get it too.
-CALIBRATION_TOPIC = '/camsim_driver/calibration'
-LATCHED = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 def decode_bgr8(bridge, message):
@@ -14,7 +9,8 @@ def decode_bgr8(bridge, message):
     encoding = message.encoding.lower()
     if encoding not in ('bgr8', 'rgb8', 'bgra8', 'rgba8', 'mono8',
                         'bayer_rggb8', 'bayer_bggr8', 'bayer_gbrg8', 'bayer_grbg8', 'yuv422'):
-        raise ValueError(f'unsupported image encoding: {encoding}; configure camera to 8-bit')
+        raise ValueError(f'지원하지 않는 영상 encoding입니다: {encoding}. '
+                         '카메라를 8-bit 형식(bayer_rggb8, bgr8, mono8 등)으로 설정하세요.')
     return bridge.imgmsg_to_cv2(message, desired_encoding='bgr8')
 
 

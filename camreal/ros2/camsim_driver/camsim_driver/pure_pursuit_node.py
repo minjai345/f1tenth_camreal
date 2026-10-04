@@ -1,5 +1,4 @@
 """Control node: /waypoint -> pure pursuit -> /drive on a steady timer; (0, 0) unless the waypoint is fresh."""
-import hashlib
 from pathlib import Path
 import threading
 import time
@@ -12,12 +11,11 @@ from rclpy.clock import Clock, ClockType
 from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from geometry_msgs.msg import PointStamped
-from std_msgs.msg import String
 from ackermann_msgs.msg import AckermannDriveStamped
 from camreal.__main__ import load_course
 from .params import PURE_PURSUIT_NODE as PARAMETERS, MAX_SPEED_MPS, VEHICLE, declare, nonnegative, positive, required
-from .runtime import WaypointFollower, calibration_problem
-from .messages import CALIBRATION_TOPIC, LATCHED, read_waypoint
+from .runtime import WaypointFollower
+from .messages import read_waypoint
 from .spin import run
 
 
@@ -37,48 +35,34 @@ class PurePursuitNode(Node):
         self.follower = WaypointFollower(p['waypoint_timeout_s'], p['future_tolerance_s'], p['target_speed_mps'],
                                          p['wheelbase_m'], p['steer_max_rad'], p['max_waypoint_m'], p['path_frame'])
         self.frame_id, self.enabled, self.topic = p['path_frame'], p['drive_enabled'], p['waypoint_topic']
-        inputs = MutuallyExclusiveCallbackGroup()
-        self.calibration_block, status = None, 'not checked'
+        status = '확인 안 함'
         if self.enabled:
-            # Same rule as CameraPreprocessor.require_driving_calibration, on the students' calibration file ...
+            # Same rule as CameraPreprocessor.require_driving_calibration, on the students' calibration file.
             path = load_course(p['camreal_config'])['calibration']
-            data = Path(path).read_bytes()
-            c = yaml.safe_load(data)
+            c = yaml.safe_load(Path(path).read_text())
             if not isinstance(c, dict):
                 raise ValueError(f'캘리브레이션 파일 형식이 아닙니다(키: 값 YAML이어야 함): {path}')
             status = c.get('calibration_status', 'unspecified')
             if status == 'assumed':
                 raise ValueError(f'가정 캘리브레이션(calibration_status: assumed)은 미리보기 전용입니다: {path}. '
                                  'python3 -m camreal calibrate로 실측한 뒤 drive_enabled:=true로 실행하세요.')
-            # ... and it has to be the file waypoint_node loaded; (0, 0) until waypoint_node says so.
-            self.sha256 = hashlib.sha256(data).hexdigest()
-            self.calibration_block = 'waiting for waypoint_node calibration'
-            self.create_subscription(String, CALIBRATION_TOPIC, self.on_calibration, LATCHED, callback_group=inputs)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, p['drive_topic'], 1) if self.enabled else None
         self.drive_lock, self.stopped, self.last_reason = threading.Lock(), False, None
         qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE,
                          durability=DurabilityPolicy.VOLATILE)
         self.subscription = self.create_subscription(PointStamped, self.topic, self.on_waypoint, qos,
-                                                      callback_group=inputs)
+                                                      callback_group=MutuallyExclusiveCallbackGroup())
         # Steady timer continues to stop on stalled /clock, using monotonic receipt ages.
         self.timer = self.create_timer(1.0 / p['control_hz'], self.control,
                                        callback_group=MutuallyExclusiveCallbackGroup(),
                                        clock=Clock(clock_type=ClockType.STEADY_TIME))
-        output = p['drive_topic'] if self.enabled else 'no drive output'
+        output = p['drive_topic'] if self.enabled else '출력 없음(주행 끔)'
         self.get_logger().info(
-            f'Ready; drive_enabled={self.enabled}, {self.topic} -> {output}, {p["target_speed_mps"]} m/s, '
-            f'wheelbase {p["wheelbase_m"]} m, steer_max {p["steer_max_rad"]} rad, calibration={status}')
+            f'준비됨: drive_enabled={self.enabled}, {self.topic} -> {output}, {p["target_speed_mps"]} m/s, '
+            f'축간거리 {p["wheelbase_m"]} m, 조향 한계 {p["steer_max_rad"]} rad, 캘리브레이션 {status}')
 
     def ros_seconds(self):
         return self.get_clock().now().nanoseconds * 1e-9
-
-    def on_calibration(self, msg):
-        problem = calibration_problem(msg.data, self.sha256)
-        if problem and problem != self.calibration_block:
-            self.get_logger().error(f'{problem}: 두 노드를 같은 camreal_config로 함께 다시 시작하세요'
-                                    '(calibrate 뒤에는 launch를 다시). 같은 ROS_DOMAIN_ID로 같은 네트워크에 있는 '
-                                    '다른 차의 waypoint_node일 수도 있습니다. 그동안 속도 0.')
-        self.calibration_block = problem
 
     def on_waypoint(self, msg):
         stamp, frame_id, wp = read_waypoint(msg)
@@ -93,8 +77,7 @@ class PurePursuitNode(Node):
             publishers = self.count_publishers(self.topic)
             shared = f'{publishers} publishers on {self.topic}' if publishers > 1 else None
             with self.follower.lock:
-                speed, steering = self.follower.command(time.monotonic(), self.ros_seconds(),
-                                                        self.calibration_block or shared)
+                speed, steering = self.follower.command(time.monotonic(), self.ros_seconds(), shared)
                 reason = self.follower.reason
             if self.drive_pub is not None:
                 self.publish_drive(speed, steering)
@@ -103,7 +86,7 @@ class PurePursuitNode(Node):
             self.get_logger().warning(f'{self.topic} publisher가 {publishers}개입니다({names}). 하나만 남기세요. '
                                       '같은 ROS_DOMAIN_ID로 같은 네트워크에 있는 다른 차일 수도 있습니다. 그동안 속도 0.',
                                       throttle_duration_sec=2.0)
-        if reason != self.last_reason and self.get_logger().info(f'Control: {reason}', throttle_duration_sec=1.0):
+        if reason != self.last_reason and self.get_logger().info(f'제어: {reason}', throttle_duration_sec=1.0):
             self.last_reason = reason   # a change hidden by the throttle is logged once it expires
 
     def publish_drive(self, speed, steering):

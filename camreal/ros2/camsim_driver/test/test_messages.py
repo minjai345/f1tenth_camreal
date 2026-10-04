@@ -57,5 +57,5 @@ def test_cv_bridge_encoding_to_bgr(encoding):
 def test_16bit_rejected():
     bridge = CvBridge()
     msg = bridge.cv2_to_imgmsg(np.ones((8, 10), np.uint16), encoding='mono16')
-    with pytest.raises(ValueError, match='unsupported image encoding'):
+    with pytest.raises(ValueError, match=r'지원하지 않는 영상 encoding입니다: mono16\. 카메라를 8-bit'):
         decode_bgr8(bridge, msg)
