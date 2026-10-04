@@ -85,7 +85,9 @@ mkdir -p data/config && cp -n camreal/ros2/camsim_driver/config/vehicle.yaml dat
 시뮬 wheelbase 0.3302 m와 f1tenth_system odometry의 0.25 m(`vesc.yaml`의 `vesc_to_odom_node.wheelbase`)는
 서로 다르며 어느 쪽도 실측값이 아니다. 실제 축간 거리를 재서 두 곳을 같이 맞춘다.
 
-캘리브레이션 형식과 처리 순서 (waypoint_node):
+캘리브레이션 파일(`data/calibration/car.yaml`)은 `python3 -m camreal calibrate`(학생 문서 1단계)가
+`ost.yaml`(1주차 학생 파일 또는 기준 파일 `camreal/config/ost_reference_1920x1200.yaml`)과 바닥 마커 클릭으로 만든다.
+형식과 처리 순서 (waypoint_node):
 
 1. `Image`를 encoding에 따라 cv_bridge로 BGR8 변환(Bayer 8-bit 포함, 16-bit 거부).
 2. 캘리브레이션의 `image_width × image_height`와 정확히 같은지 확인(자동 resize/crop 없음).
@@ -95,7 +97,7 @@ mkdir -p data/config && cp -n camreal/ros2/camsim_driver/config/vehicle.yaml dat
 
 `calibration_status: assumed`(가정 캘리브레이션)이면 `drive_enabled:=true`에서 pure_pursuit_node가 시작을 거부한다.
 waypoint_node는 그대로 예측·시각화를 한다.
-영상 해상도가 캘리브레이션과 다르면 waypoint_node가 매 영상 오류 로그에 두 해상도와 해결 방법 3가지를 남기고 `/waypoint`를 내지 않는다.
+영상 해상도가 캘리브레이션과 다르면 waypoint_node가 오류 로그(2초에 한 번)에 두 해상도와 해결 방법 3가지를 남기고 `/waypoint`를 내지 않는다.
 노드는 시작할 때만 캘리브레이션 파일을 읽는다. `calibrate`로 파일을 바꾸면 launch를 다시 실행한다.
 
 ## 실행

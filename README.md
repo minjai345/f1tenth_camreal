@@ -21,6 +21,7 @@
 camsim 5장에서 저장한 `model.onnx` + `checkpoint.json`을 실차 Jetson에서 그대로 쓴다(onnxruntime CUDA).
 
 ```text
+캘리브레이션: python3 -m camreal calibrate calib [--ost camreal/config/ost_reference_1920x1200.yaml]
 주행: ros2 launch camsim_driver camsim_driver.launch.py [drive_enabled:=true]
 기록: ros2 bag record ...
 준비: python3 -m camreal prepare run_train

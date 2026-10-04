@@ -22,4 +22,4 @@ BEV 밖으로 나간 예측은 가장자리에 빈 원으로 표시된다.
 `--hfov-deg`, `--camera-height-m`, `--pitch-deg`, `--offset-x-m`으로 바꿀 수 있지만 실측값은 아니다.
 이미지 해상도에 맞게 만들어야 하고, 이 파일로는 ROS 노드의 주행 활성화가 거부된다.
 
-모델별 실데이터 오차 비교는 `python3 -m camreal.evaluate`를 쓴다([학생 문서 6단계](../README.md#6-각자-실데이터로-학습해-보기)).
+모델별 실데이터 오차 비교는 `python3 -m camreal.evaluate`를 쓴다([학생 문서 8단계](../README.md#8-각자-실데이터로-학습해-보기)).

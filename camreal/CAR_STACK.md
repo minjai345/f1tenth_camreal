@@ -140,5 +140,6 @@ ros2 launch f1tenth_stack bringup_launch.py
 | `/waypoint publisher가 2개입니다` | 같은 `ROS_DOMAIN_ID`를 쓰는 다른 차가 있을 수 있음. 7단계 확인 |
 | 빌드 중 멈춤, 메모리 부족 | 브라우저 등을 닫고 `colcon build --parallel-workers 1` |
 | `CUDAExecutionProvider`가 없음, `onnxruntime에 CUDA가 없습니다` | `pip3 install "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/4eb/e6a8902dc7708/onnxruntime_gpu-1.23.0-cp310-cp310-linux_aarch64.whl#sha256=4ebe6a8902dc7708434b2e1541b3fe629ebf434e16ab5537d1d6a622b42c622b"` |
+| `No module named 'torch'` (`python3 -m camreal export`의 `3/3`에서) | torch는 데이터셋 만들기(`export`)에만 필요함. `pip3 install "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/62a/1beee9f2f1470/torch-2.8.0-cp310-cp310-linux_aarch64.whl#sha256=62a1beee9f2f147076a974d2942c90060c12771c94740830327cae705b2595fc"` 후 export를 새 이름으로 다시 (예: `week3_real_v2`) |
 
 매번 `source` 치기 싫으면 한 번만: `echo 'source ~/f1tenth_ws/install/setup.bash' >> ~/.bashrc`
