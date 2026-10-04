@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 from camsim.pure_pursuit import pure_pursuit
 
-MIN_MEAN, MIN_STD = 15., 4.   # uint8 BEV statistics of a covered lens, a dark room or a featureless view
+MIN_EDGE, EDGE_PER_NOISE = 2.5, .5   # see ImageCheck
 
 
 @dataclass(frozen=True)
@@ -21,12 +21,31 @@ def valid_waypoint(wp, max_waypoint_m):
     return bool(wp.shape == (2,) and np.isfinite(wp).all() and wp[0] > 0 and np.hypot(*wp) <= max_waypoint_m)
 
 
-def image_problem(bev, mask):
-    """The model outputs a point even for a black frame; None = the visible BEV region carries an image."""
-    mean, std = (value.max() for value in cv2.meanStdDev(bev, mask=mask.astype(np.uint8)))
-    if mean < MIN_MEAN or std < MIN_STD:
-        return f'image too dark or uniform (mean {mean:.0f}, std {std:.1f})'
-    return None
+class ImageCheck:
+    """The model outputs a point even for a covered lens, so it only runs on a view with tape-scale edges.
+
+    Auto exposure turns a covered lens into smooth shading plus amplified noise, which a mean/std test takes for an
+    image. Edge = RMS of (10 cm box blur - 40 cm box blur) over the visible BEV, uint8 levels; some channel has to
+    reach MIN_EDGE (shading measures ~1) and EDGE_PER_NOISE x its pixel noise (noise alone ~0.3). Tape: ~10.
+    """
+
+    def __init__(self, mask, resolution_m):
+        self.small, self.large = (2 * round(width / resolution_m / 2) + 1 for width in (.10, .40))
+        # The floor colour filled in outside the mask must not count as an edge.
+        self.region = cv2.erode(mask.astype(np.uint8), np.ones((self.large + 2,) * 2, np.uint8))
+        if not self.region.any():
+            raise ValueError('학습 BEV에서 카메라가 보는 영역이 너무 좁아 영상 검사를 할 수 없습니다. '
+                             '캘리브레이션(H_i2g)을 확인하세요.')
+
+    def __call__(self, bev):
+        """None = edges in view; otherwise why the frame gets no waypoint."""
+        f = bev.astype(np.float32)
+        band = cv2.blur(f, (self.small,) * 2) - cv2.blur(f, (self.large,) * 2)
+        edge = np.sqrt(cv2.mean(band * band, mask=self.region)[:3])
+        noise = 1.25 * np.array(cv2.mean(np.abs(f - cv2.blur(f, (3, 3))), mask=self.region)[:3])   # ~ its std
+        need = np.maximum(MIN_EDGE, EDGE_PER_NOISE * noise)
+        c = np.argmax(edge / need)
+        return None if edge[c] >= need[c] else f'no edges in view (edge {edge[c]:.1f} < {need[c]:.1f})'
 
 
 def calibration_problem(reported, sha256):
@@ -44,9 +63,9 @@ class FrameMailbox:
 
     def __init__(self, input_timeout, future_tolerance, max_waypoint_m):
         if any(not np.isfinite(v) or v <= 0 for v in (input_timeout, max_waypoint_m)):
-            raise ValueError('input timeout and waypoint bound must be positive and finite')
+            raise ValueError('input_timeout_s와 max_waypoint_m은 0보다 큰 유한한 값이어야 합니다.')
         if not np.isfinite(future_tolerance) or future_tolerance < 0:
-            raise ValueError('future tolerance must be finite and nonnegative')
+            raise ValueError('future_tolerance_s는 0 이상의 유한한 값이어야 합니다.')
         self.input_timeout, self.future_tolerance = input_timeout, future_tolerance
         self.max_waypoint_m = max_waypoint_m
         self.condition = Condition()
@@ -117,11 +136,11 @@ class WaypointFollower:
 
     def __init__(self, timeout, future_tolerance, speed, wheelbase, steer_max, max_waypoint_m, frame_id):
         if any(not np.isfinite(v) or v <= 0 for v in (timeout, wheelbase, steer_max, max_waypoint_m)):
-            raise ValueError('waypoint timeout, wheelbase, steer_max and max_waypoint_m must be positive and finite')
+            raise ValueError('waypoint_timeout_s, wheelbase_m, steer_max_rad, max_waypoint_m은 0보다 큰 유한한 값이어야 합니다.')
         if not np.isfinite(speed) or speed < 0 or not np.isfinite(future_tolerance) or future_tolerance < 0:
-            raise ValueError('speed/future tolerance must be finite and nonnegative')
+            raise ValueError('target_speed_mps와 future_tolerance_s는 0 이상의 유한한 값이어야 합니다.')
         if not frame_id:
-            raise ValueError('frame_id is empty')
+            raise ValueError('path_frame 값이 비었습니다.')
         self.timeout, self.future_tolerance = timeout, future_tolerance
         self.speed, self.wheelbase, self.steer_max = speed, wheelbase, steer_max
         self.max_waypoint_m, self.frame_id = max_waypoint_m, frame_id
@@ -133,7 +152,8 @@ class WaypointFollower:
         return -self.future_tolerance <= ros_now - stamp <= self.timeout
 
     def update(self, wp, stamp, frame_id, now, ros_now):
-        """False = rejected; a rejected message also drops the held waypoint."""
+        """False = rejected; a rejected message also drops the held waypoint. reason: why the output is zero,
+        'valid' only from command()."""
         with self.lock:
             seen = self.last_seen
             if np.isfinite(stamp) and self._window(stamp, ros_now) and (seen is None or stamp > seen):
@@ -153,7 +173,7 @@ class WaypointFollower:
             else:
                 wp = np.array(wp, dtype=float)
                 wp.flags.writeable = False
-                self.held, self.reason = (wp, stamp, now), 'valid'
+                self.held = wp, stamp, now
                 return True
             self.held, self.reason = None, reason
             return False
@@ -173,4 +193,5 @@ class WaypointFollower:
             if not np.isfinite(steering):
                 self.held, self.reason = None, 'nonfinite steering'
                 return 0.0, 0.0
+            self.reason = 'valid'
             return self.speed, steering

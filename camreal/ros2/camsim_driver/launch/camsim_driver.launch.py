@@ -10,8 +10,8 @@ from camsim_driver.params import read_vehicle_yaml
 def nodes(context):
     params = os.path.abspath(LaunchConfiguration('params_file').perform(context))
     if not os.path.isfile(params):
-        raise RuntimeError(f'params_file not found: {params}. Run from the repository root '
-                           '(cd ~/f1tenth_gym) or pass params_file:=/absolute/path/vehicle.yaml')
+        raise RuntimeError(f'params_file이 없습니다: {params}. 저장소 루트(cd ~/f1tenth_gym)에서 실행하거나 '
+                           'params_file:=/절대경로/vehicle.yaml로 지정하세요.')
     read_vehicle_yaml(params)   # old layout, typos, 1 for 1.0
     enabled = LaunchConfiguration('drive_enabled').perform(context).strip().lower() in ('true', '1', 'yes')
     # Both nodes read the same /** section; only pure_pursuit_node gets the drive switch. While driving, its exit

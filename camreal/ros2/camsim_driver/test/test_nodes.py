@@ -33,15 +33,24 @@ from std_msgs.msg import String
 from camsim import camera, config
 from camsim.handoff import sha256_file
 from camsim.pure_pursuit import pure_pursuit
-from camreal.tests.conftest import make_model_dir
+from camreal.tests.conftest import make_model_dir, tape_lane
 from camsim_driver.messages import CALIBRATION_TOPIC, LATCHED, make_waypoint
 from camsim_driver.params import PURE_PURSUIT_NODE, WAYPOINT_NODE
+from camsim_driver import waypoint_node
 from camsim_driver.pure_pursuit_node import PurePursuitNode
 from camsim_driver.waypoint_node import WaypointNode
 
 WP, NORM = (1., .2), 2.   # the test model predicts WP for every image
 IMAGE, WAYPOINT, DRIVE = '/test/image', '/test/waypoint', '/test/drive'
-NOISE = np.random.default_rng(0).integers(0, 256, (400, 640, 3), np.uint8)
+RNG = np.random.default_rng(0)
+TRACK = np.clip(tape_lane(config.load()) + RNG.normal(0, 2, (400, 640, 3)), 0, 255).astype(np.uint8)
+YY, XX = np.mgrid[:400, :640] - np.array([200, 320])[:, None, None]
+SHADING = .7 + .3 / (1 + (XX ** 2 + YY ** 2) / 320 ** 2)[..., None] ** 2   # 30 % cos^4 lens shading
+COVERED = {   # auto exposure brightens a covered lens: noise and smooth shading, no edges
+    'black frame': np.zeros_like(TRACK),
+    'covered, auto gain': np.clip(RNG.normal(20, 10, TRACK.shape), 0, 255).astype(np.uint8),
+    'palm, auto exposure': np.clip(np.array([70, 95, 140]) * SHADING + RNG.normal(0, 2, TRACK.shape), 0, 255
+                                   ).astype(np.uint8)}
 ROOT = Path(__file__).resolve().parents[4]
 
 
@@ -173,7 +182,7 @@ def declared(node):
 def test_image_to_waypoint_to_drive_and_stop(tmp_path, context):
     model, cfg, _ = make_model_dir(tmp_path, constant_head, waypoints__norm_m=NORM)
     course = write_course(tmp_path, model, cfg)
-    harness = Harness(context, image=NOISE)
+    harness = Harness(context, image=TRACK)
     perception = WaypointNode(context=context, parameter_overrides=params(
         camreal_config=str(course), device='cpu', waypoint_topic=WAYPOINT,
         path_topic='/test/predicted_path', debug_image_topic='/test/bev'))
@@ -247,10 +256,10 @@ def test_image_to_waypoint_to_drive_and_stop(tmp_path, context):
             node.destroy_node()
 
 
-@pytest.mark.parametrize('case', ['covered camera', 'point behind'])
+@pytest.mark.parametrize('case', [*COVERED, 'point behind'])
 def test_no_waypoint_and_only_zero_drive(tmp_path, context, case):
-    wp, image, reason = ((WP, np.zeros_like(NOISE), 'image too dark or uniform') if case == 'covered camera'
-                         else ((-1., .2), NOISE, 'invalid waypoint output'))
+    wp, image, reason = ((WP, COVERED[case], 'no edges in view') if case in COVERED
+                         else ((-1., .2), TRACK, 'invalid waypoint output'))
     model, cfg, _ = make_model_dir(tmp_path, lambda net: constant_head(net, wp), waypoints__norm_m=NORM)
     course = write_course(tmp_path, model, cfg)
     harness = Harness(context, image=image)
@@ -289,9 +298,36 @@ def test_drive_waits_for_the_calibration_waypoint_node_loaded(tmp_path, context)
         assert wait_for(lambda: moving(matched), 5.)
 
 
+def test_calibration_saved_while_waypoint_node_reads_it_is_refused(tmp_path, context, monkeypatch):
+    """The announced SHA-256 must describe the H_i2g in use, or a later pure_pursuit_node drives on a stale one."""
+    model, cfg, _ = make_model_dir(tmp_path, constant_head, waypoints__norm_m=NORM)
+    course = write_course(tmp_path, model, cfg)
+    load = waypoint_node.CameraPreprocessor
+
+    def calibrate_saves_meanwhile(path, *args):
+        preprocessor = load(path, *args)
+        Path(path).write_text(Path(path).read_text() + '# saved by calibrate\n')
+        return preprocessor
+    monkeypatch.setattr(waypoint_node, 'CameraPreprocessor', calibrate_saves_meanwhile)
+    with pytest.raises(ValueError, match='읽는 동안 바뀌었습니다'):
+        WaypointNode(context=context, parameter_overrides=params(camreal_config=str(course), device='cpu'))
+
+
+def test_final_zero_waits_until_subscribers_have_it(tmp_path, context):
+    """Published is not delivered: under load DDS dropped the last sample of a process that exited right after."""
+    course = write_course(tmp_path, tmp_path/'model', config.load())
+    node = PurePursuitNode(context=context, parameter_overrides=params(
+        camreal_config=str(course), drive_enabled=True, wheelbase_m=.3, drive_topic=DRIVE))
+    calls, publish = [], node.drive_pub.publish
+    node.drive_pub.publish = lambda msg: calls.append(('publish', msg.drive.speed)) or publish(msg)
+    node.drive_pub.wait_for_all_acked = lambda timeout: calls.append(('acked', timeout.nanoseconds)) or True
+    node.destroy_node()
+    assert calls == [('publish', 0.), ('acked', 500_000_000)]
+
+
 def test_drive_refuses_assumed_calibration(tmp_path, context):
     course = write_course(tmp_path, tmp_path/'model', config.load(), status='assumed')
-    with pytest.raises(ValueError, match='ASSUMED'):
+    with pytest.raises(ValueError, match=r'가정 캘리브레이션\(calibration_status: assumed\)은 미리보기 전용'):
         PurePursuitNode(context=context, parameter_overrides=params(
             camreal_config=str(course), drive_enabled=True, wheelbase_m=.3))
 
@@ -299,11 +335,23 @@ def test_drive_refuses_assumed_calibration(tmp_path, context):
 @pytest.mark.parametrize('values,match', [
     (dict(), 'wheelbase_m=0.0.*vehicle.yaml'), (dict(wheelbase_m=1), 'wheelbase_m.*1.0'),
     (dict(wheelbase_m=.3, steer_max_rad=0.), 'steer_max_rad'), (dict(wheelbase_m=.3, control_hz=0.), 'control_hz'),
-    (dict(wheelbase_m=.3, waypoint_timeout_s=-1.), 'waypoint_timeout_s'),
-    (dict(wheelbase_m=.3, path_frame=''), 'path_frame')])
+    (dict(wheelbase_m=.3, waypoint_timeout_s=-1.), 'waypoint_timeout_s=-1.0: 0보다 큰'),
+    (dict(wheelbase_m=.3, path_frame=''), 'path_frame 값이 비었습니다'),
+    (dict(wheelbase_m=.3, future_tolerance_s=-.1), 'future_tolerance_s=-0.1: 0 이상'),
+    (dict(wheelbase_m=.3, target_speed_mps=-.1), 'target_speed_mps=-0.1: 0 이상'),
+    (dict(wheelbase_m=.3, target_speed_mps=5.), r'target_speed_mps=5.0: .*2.0 m/s.*vehicle.yaml')])   # 0.5 typo
 def test_control_startup_errors_name_the_parameter(context, values, match):
     with pytest.raises(ValueError, match=match):
         PurePursuitNode(context=context, parameter_overrides=params(**values))
+
+
+@pytest.mark.parametrize('values,match', [
+    (dict(waypoint_topic=''), 'waypoint_topic 값이 비었습니다'),
+    (dict(image_qos_reliability='fast'), 'image_qos_reliability=fast: best_effort 또는 reliable'),
+    (dict(input_timeout_s=0.), 'input_timeout_s=0.0: 0보다 큰'), (dict(future_tolerance_s=-1.), 'future_tolerance_s')])
+def test_perception_startup_errors_name_the_parameter(context, values, match):
+    with pytest.raises(ValueError, match=match):
+        WaypointNode(context=context, parameter_overrides=params(**values))
 
 
 def test_drive_disabled_reads_no_course_and_has_no_drive_publisher(context):
@@ -341,7 +389,8 @@ def test_launch_checks_vehicle_yaml_and_gives_drive_only_to_the_controller(tmp_p
         assert isinstance(control._ExecuteLocal__on_exit, Shutdown) == enabled
         assert perception._ExecuteLocal__on_exit is None
     for data, match in (({'camsim_driver_node': {'ros__parameters': {'wheelbase_m': .3}}}, '이전 형식'),
-                        ({'/**': {'ros__parameters': {'wheelbase_m': .3, 'target_speed': .3}}}, 'target_speed')):
+                        ({'/**': {'ros__parameters': {'wheelbase_m': .3, 'target_speed': .3}}}, 'target_speed'),
+                        ({'/**': {'ros__parameters': {'wheelbase_m': .3, 'drive_enabled': True}}}, 'drive_enabled')):
         vehicle.write_text(yaml.safe_dump(data))
         with pytest.raises(ValueError, match=match):
             launch_file.nodes(launch_context)
@@ -354,7 +403,8 @@ def test_startup_setting_error_prints_the_fix_without_a_traceback(context):
     result = subprocess.run(CONTROLLER + ['--ros-args', '-p', 'wheelbase_m:=0.0'], cwd=ROOT, capture_output=True,
                             text=True, timeout=60, env=dict(os.environ, ROS_DOMAIN_ID=str(context.get_domain_id())))
     output = result.stdout + result.stderr
-    assert result.returncode == 1 and 'wheelbase_m=0.0: 축간거리를 실측해' in output and 'Traceback' not in output
+    assert result.returncode == 1 and 'Traceback' not in output
+    assert 'pure_pursuit_node를 시작하지 못했습니다(/drive 없음): wheelbase_m=0.0: 축간거리를 실측해' in output
 
 
 # A parent that dies without signalling its children, like ros2 launch after SIGTERM or SIGKILL.
@@ -362,7 +412,7 @@ ORPHANING_PARENT = [sys.executable, '-c', 'import subprocess, sys, time; p = sub
                     'stdout=sys.stderr); print(p.pid, flush=True); time.sleep(60)']
 
 
-@pytest.mark.parametrize('how', ['SIGINT twice', 'SIGHUP', 'parent killed'])
+@pytest.mark.parametrize('how', ['SIGINT twice', 'SIGINT until it exits', 'SIGHUP', 'parent killed'])
 def test_stop_signal_or_dead_parent_sends_the_final_zero(tmp_path, context, how):
     """The real entry point (spin.run), started the way ros2 launch and ros2 run start it."""
     course = write_course(tmp_path, tmp_path/'model', config.load())
@@ -387,6 +437,10 @@ def test_stop_signal_or_dead_parent_sends_the_final_zero(tmp_path, context, how)
         if how == 'SIGINT twice':   # Ctrl+C reaches the node directly and again through ros2 launch
             process.send_signal(signal.SIGINT)
             process.send_signal(signal.SIGINT)
+        elif how == 'SIGINT until it exits':   # a late one used to kill it by signal: launch logged a crash
+            while process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                time.sleep(.002)
         else:
             process.send_signal(signal.SIGKILL if orphaned else signal.SIGHUP)
         if not orphaned:

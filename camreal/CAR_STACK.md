@@ -89,7 +89,22 @@ ls -l /dev/sensors/vesc
 `/dev/sensors/vesc -> ../ttyACM0`처럼 나오면 됨. 안 나오면 VESC USB를 뽑았다 다시 꽂기.
 LiDAR는 이 실습에서 안 씀.
 
-## 7. 차량 스택 켜기
+## 7. 차마다 ROS 도메인 나누기 (차마다 한 번)
+
+같은 공유기에 차가 여러 대면 ROS 토픽이 서로 섞임. 다른 차의 `/drive`가 이 차를 움직이고,
+주행 노드는 `/waypoint` publisher가 둘이라며 멈춤. 차 번호(1~101)를 차마다 다르게 넣을 것.
+
+```bash
+echo 'export ROS_DOMAIN_ID=차_번호' >> ~/.bashrc
+echo 'export ROS_LOCALHOST_ONLY=1' >> ~/.bashrc
+```
+
+- `차_번호` 자리에 차에 붙은 번호를 넣을 것 (예: `ROS_DOMAIN_ID=3`)
+- 두 번째 줄은 차 밖(노트북)에서 토픽을 볼 일이 없을 때만. 화면·조이스틱·카메라가 모두 차에 붙어 있으면 넣을 것
+- 새 터미널부터 적용됨. 열려 있던 터미널은 모두 닫고 다시 열 것
+- 확인: 새 터미널에서 `echo $ROS_DOMAIN_ID`가 차 번호
+
+## 8. 차량 스택 켜기
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -115,6 +130,8 @@ ros2 launch f1tenth_stack bringup_launch.py
 | 빌드 중 `asio_cmake_module` 없음 | `sudo apt install -y ros-humble-asio-cmake-module` 후 3단계 다시 |
 | `Package 'f1tenth_stack' not found` | 빌드가 중간에 멈춘 것. 3단계 다시 실행해서 `11 packages finished` 확인 |
 | `package 'camsim_driver' not found` | 4단계를 안 했거나 `source ~/f1tenth_gym/install/setup.bash`를 빠뜨림 |
+| 다른 터미널의 토픽이 안 보임 (`ros2 topic list`에 없음) | 7단계 전에 연 터미널. 닫고 새로 열 것 |
+| `/waypoint publisher가 2개입니다` | 같은 `ROS_DOMAIN_ID`를 쓰는 다른 차가 있을 수 있음. 7단계 확인 |
 | 빌드 중 멈춤, 메모리 부족 | 브라우저 등을 닫고 `colcon build --parallel-workers 1` |
 | `CUDAExecutionProvider`가 없음, `onnxruntime에 CUDA가 없습니다` | `pip3 install "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/4eb/e6a8902dc7708/onnxruntime_gpu-1.23.0-cp310-cp310-linux_aarch64.whl#sha256=4ebe6a8902dc7708434b2e1541b3fe629ebf434e16ab5537d1d6a622b42c622b"` |
 

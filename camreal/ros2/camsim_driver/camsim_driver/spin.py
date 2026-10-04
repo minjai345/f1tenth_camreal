@@ -11,8 +11,8 @@ def run(node_class, make_executor, failure, args=None):
     # rclpy's own handlers shut the context down before destroy_node (the final stop could not be sent),
     # and the second SIGINT forwarded by ros2 launch raised KeyboardInterrupt inside destroy_node.
     # SIGHUP: the terminal or SSH session closed. SIGQUIT: Ctrl+\.
-    stop = threading.Event()
-    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+    stop, signals = threading.Event(), (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+    for signum in signals:
         signal.signal(signum, lambda *_: stop.set())
     # PR_SET_PDEATHSIG: a parent that dies without signalling us (ros2 launch after SIGTERM, SIGKILL) sends SIGTERM.
     parent = os.getppid()
@@ -41,3 +41,7 @@ def run(node_class, make_executor, failure, args=None):
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+        # Interpreter exit resets Python handlers to the default: a late Ctrl+C would end it by signal, logged by
+        # ros2 launch as a crash ("process has died") after a clean stop.
+        for signum in signals:
+            signal.signal(signum, signal.SIG_IGN)

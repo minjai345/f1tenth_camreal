@@ -30,6 +30,8 @@ git pull jt main     # camsim 업데이트. 그다음 colcon build 다시 (아�
 
 학생이 직접 설치할 때는 [차량 스택 설치 문서](CAR_STACK.md)를 따라 하게 한다(명령 복사로 끝나게 작성, 새 폴더 빌드로 검증함).
 아래는 같은 내용의 요약이다.
+차가 여러 대면 차마다 `ROS_DOMAIN_ID`를 다르게 둔다(CAR_STACK.md 7단계). 같은 공유기에서 같은 ID면 다른 차의 `/drive`가
+이 차를 움직이고, 주행 노드는 다른 차의 `/waypoint`·캘리브레이션 알림 때문에 속도 0에 머문다.
 
 ```bash
 sudo apt update && sudo apt install -y ros-humble-ackermann-msgs ros-humble-serial-driver ros-humble-urg-node \

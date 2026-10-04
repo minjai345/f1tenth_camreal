@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 
@@ -23,6 +24,15 @@ def make_model_dir(root, edit_net=None, **overrides):
     onnx = model.export_onnx(net, cfg, root/'weights'/'model.onnx')
     handoff.export_checkpoint(onnx, root/'model', cfg, 'test-commit')
     return root/'model', cfg, net
+
+
+def tape_lane(cfg):
+    """A straight lane of 5 cm yellow tape 0.8 m apart on the floor, as the camera of cfg sees it (BGR uint8)."""
+    from camsim import camera, render
+    x = np.arange(.3, 4., .05)
+    quads = np.array([[[a, y - .025], [a + .05, y - .025], [a + .05, y + .025], [a, y + .025]]
+                      for y in (.4, -.4) for a in x])
+    return render.render((0., 0., 0.), quads, None, camera.build(cfg)[0], cfg)
 
 
 @pytest.fixture

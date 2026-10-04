@@ -9,12 +9,13 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.clock import Clock, ClockType
+from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from geometry_msgs.msg import PointStamped
 from std_msgs.msg import String
 from ackermann_msgs.msg import AckermannDriveStamped
 from camreal.__main__ import load_course
-from .params import PURE_PURSUIT_NODE as PARAMETERS, declare, positive
+from .params import PURE_PURSUIT_NODE as PARAMETERS, MAX_SPEED_MPS, VEHICLE, declare, nonnegative, positive, required
 from .runtime import WaypointFollower, calibration_problem
 from .messages import CALIBRATION_TOPIC, LATCHED, read_waypoint
 from .spin import run
@@ -25,12 +26,14 @@ class PurePursuitNode(Node):
         super().__init__('pure_pursuit_node', **kwargs)
         p = declare(self, PARAMETERS)   # startup-only: no unvalidated live geometry/enable changes
         if not (np.isfinite(p['wheelbase_m']) and p['wheelbase_m'] > 0):
-            raise ValueError(f'wheelbase_m={p["wheelbase_m"]}: 축간거리를 실측해 vehicle.yaml(data/config/vehicle.yaml)의 '
+            raise ValueError(f'wheelbase_m={p["wheelbase_m"]}: 축간거리를 실측해 {VEHICLE}의 '
                              'wheelbase_m에 m 단위로 적으세요(예: 0.33).')
         positive(p, 'control_hz', 'waypoint_timeout_s', 'steer_max_rad', 'max_waypoint_m')
-        for key in ('camreal_config', 'waypoint_topic', 'drive_topic', 'path_frame'):
-            if not p[key]:
-                raise ValueError(f'required parameter is empty: {key}')
+        nonnegative(p, 'future_tolerance_s', 'target_speed_mps')
+        if p['target_speed_mps'] > MAX_SPEED_MPS:
+            raise ValueError(f'target_speed_mps={p["target_speed_mps"]}: 수업 상한 {MAX_SPEED_MPS} m/s를 넘습니다. '
+                             f'{VEHICLE}의 값을 확인하세요(예: 0.5).')
+        required(p, 'camreal_config', 'waypoint_topic', 'drive_topic', 'path_frame')
         self.follower = WaypointFollower(p['waypoint_timeout_s'], p['future_tolerance_s'], p['target_speed_mps'],
                                          p['wheelbase_m'], p['steer_max_rad'], p['max_waypoint_m'], p['path_frame'])
         self.frame_id, self.enabled, self.topic = p['path_frame'], p['drive_enabled'], p['waypoint_topic']
@@ -42,11 +45,11 @@ class PurePursuitNode(Node):
             data = Path(path).read_bytes()
             c = yaml.safe_load(data)
             if not isinstance(c, dict):
-                raise ValueError(f'calibration is not a YAML mapping: {path}')
+                raise ValueError(f'캘리브레이션 파일 형식이 아닙니다(키: 값 YAML이어야 함): {path}')
             status = c.get('calibration_status', 'unspecified')
             if status == 'assumed':
-                raise ValueError(f'ASSUMED calibration is preview-only ({path}); '
-                                 'replace with measured calibration before drive_enabled:=true')
+                raise ValueError(f'가정 캘리브레이션(calibration_status: assumed)은 미리보기 전용입니다: {path}. '
+                                 'python3 -m camreal calibrate로 실측한 뒤 drive_enabled:=true로 실행하세요.')
             # ... and it has to be the file waypoint_node loaded; (0, 0) until waypoint_node says so.
             self.sha256 = hashlib.sha256(data).hexdigest()
             self.calibration_block = 'waiting for waypoint_node calibration'
@@ -73,7 +76,8 @@ class PurePursuitNode(Node):
         problem = calibration_problem(msg.data, self.sha256)
         if problem and problem != self.calibration_block:
             self.get_logger().error(f'{problem}: 두 노드를 같은 camreal_config로 함께 다시 시작하세요'
-                                    '(calibrate 뒤에는 launch를 다시). 그동안 속도 0.')
+                                    '(calibrate 뒤에는 launch를 다시). 같은 ROS_DOMAIN_ID로 같은 네트워크에 있는 '
+                                    '다른 차의 waypoint_node일 수도 있습니다. 그동안 속도 0.')
         self.calibration_block = problem
 
     def on_waypoint(self, msg):
@@ -97,7 +101,8 @@ class PurePursuitNode(Node):
         if publishers > 1:
             names = ', '.join(sorted(info.node_name for info in self.get_publishers_info_by_topic(self.topic)))
             self.get_logger().warning(f'{self.topic} publisher가 {publishers}개입니다({names}). 하나만 남기세요. '
-                                      '그동안 속도 0.', throttle_duration_sec=2.0)
+                                      '같은 ROS_DOMAIN_ID로 같은 네트워크에 있는 다른 차일 수도 있습니다. 그동안 속도 0.',
+                                      throttle_duration_sec=2.0)
         if reason != self.last_reason and self.get_logger().info(f'Control: {reason}', throttle_duration_sec=1.0):
             self.last_reason = reason   # a change hidden by the throttle is logged once it expires
 
@@ -113,9 +118,11 @@ class PurePursuitNode(Node):
             self.stopped = True
             if self.drive_pub is not None and self.context.ok():
                 self.publish_drive(0.0, 0.0)
+                # The process exits next; under load DDS dropped the sample unless the mux acknowledged it.
+                self.drive_pub.wait_for_all_acked(Duration(seconds=0.5))
         return super().destroy_node()
 
 
 def main(args=None):
     run(PurePursuitNode, lambda: MultiThreadedExecutor(num_threads=2),
-        'pure_pursuit_node startup failed; drive output inactive', args)
+        'pure_pursuit_node를 시작하지 못했습니다(/drive 없음)', args)

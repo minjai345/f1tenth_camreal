@@ -1,13 +1,20 @@
 """ROS-free checks of the perception mailbox and the control-side waypoint follower."""
+from pathlib import Path
 import threading
 import time
+import cv2
 import numpy as np
 import pytest
+from camsim import config
 from camsim.pure_pursuit import pure_pursuit
+from camreal.checkpoint import training_mask
+from camreal.preprocessing import CameraPreprocessor
+from camreal.tests.conftest import tape_lane
 from camsim_driver import runtime
-from camsim_driver.runtime import FrameMailbox, WaypointFollower, calibration_problem, image_problem, valid_waypoint
+from camsim_driver.runtime import FrameMailbox, ImageCheck, WaypointFollower, calibration_problem, valid_waypoint
 
 BAD = [[], [np.nan, 0], [1, np.inf], [-1, 0], [0, 0], [[1, 0], [2, 0]], [100, 0], [4.3, 4.3]]
+ASSUMED = Path(__file__).resolve().parents[1]/'config'/'calibration.assumed.1920x1200.yaml'
 
 
 def mailbox():
@@ -159,9 +166,19 @@ def test_follower_rejects_invalid_waypoint(wp):
 def test_follower_timeout_after_silence():
     follow = follower()
     assert follow.command(1., 10.) == (0., 0.) and follow.reason == 'waiting for waypoint'
-    assert follow.update([1., 0.], 10., 'rear_axle', 1., 10.) and follow.reason == 'valid'
-    assert follow.command(1.19, 10.19)[0] == .5
+    assert follow.update([1., 0.], 10., 'rear_axle', 1., 10.)
+    assert follow.command(1.19, 10.19)[0] == .5 and follow.reason == 'valid'
     assert follow.command(1.21, 10.21) == (0., 0.) and follow.reason == 'waypoint timeout'
+
+
+def test_reason_describes_the_last_command_not_the_last_message():
+    """Messages arrive between control ticks: an accepted one is no reason to read 'valid' while held at zero."""
+    follow = follower()
+    assert follow.update([1., 0.], 10., 'rear_axle', 1., 10.) and follow.reason == 'waiting for waypoint'
+    assert follow.command(1.01, 10.01, 'waiting for waypoint_node calibration') == (0., 0.)
+    assert follow.update([1., 0.], 10.02, 'rear_axle', 1.02, 10.02)
+    assert follow.reason == 'waiting for waypoint_node calibration'
+    assert follow.command(1.03, 10.03)[0] == .5 and follow.reason == 'valid'
 
 
 @pytest.mark.parametrize('wp', [[1., 0.], [1., 1.], [.5, -.4], [.3, .5]])
@@ -171,39 +188,60 @@ def test_follower_steering_is_camsim_pure_pursuit(wp):
     assert follow.command(1.01, 10.01) == (.5, pure_pursuit(wp, .3, .4))
 
 
-@pytest.mark.parametrize('change', [dict(timeout=0.), dict(wheelbase=0.), dict(steer_max=np.nan),
-                                    dict(max_waypoint_m=-1.), dict(speed=-.1), dict(future_tolerance=-1.),
-                                    dict(frame_id='')])
-def test_follower_rejects_bad_configuration(change):
+@pytest.mark.parametrize('change,name', [
+    (dict(timeout=0.), 'waypoint_timeout_s'), (dict(wheelbase=0.), 'wheelbase_m'),
+    (dict(steer_max=np.nan), 'steer_max'), (dict(max_waypoint_m=-1.), 'max_waypoint_m'),
+    (dict(speed=-.1), 'target_speed_mps'), (dict(future_tolerance=-1.), 'future_tolerance_s'),
+    (dict(frame_id=''), 'path_frame 값이 비었습니다')])
+def test_follower_rejects_bad_configuration(change, name):
     args = dict(timeout=.2, future_tolerance=.02, speed=.5, wheelbase=.3, steer_max=.4,
                 max_waypoint_m=6., frame_id='rear_axle')
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=name):
         WaypointFollower(**{**args, **change})
 
 
-@pytest.mark.parametrize('args', [(0., .02, 6.), (np.inf, .02, 6.), (.25, -.01, 6.), (.25, .02, 0.)])
-def test_mailbox_rejects_bad_configuration(args):
-    with pytest.raises(ValueError):
+@pytest.mark.parametrize('args,name', [((0., .02, 6.), 'input_timeout_s'), ((np.inf, .02, 6.), 'input_timeout_s'),
+                                       ((.25, -.01, 6.), 'future_tolerance_s'), ((.25, .02, 0.), 'max_waypoint_m')])
+def test_mailbox_rejects_bad_configuration(args, name):
+    with pytest.raises(ValueError, match=f'{name}.*유한한 값'):
         FrameMailbox(*args)
 
 
-def test_dark_or_uniform_view_is_flagged_inside_the_visible_region_only():
-    rng = np.random.default_rng(1)
-    mask = np.zeros((60, 76), bool)
-    mask[20:, 10:66] = True
-    floor = np.full((60, 76, 3), 128, np.uint8) + rng.integers(0, 3, (60, 76, 3), dtype=np.uint8)
-    taped = floor.copy()
-    taped[:, 38] = (0, 200, 220)   # one 5 cm tape line on a plain floor is enough texture
-    assert image_problem(taped, mask) is None
-    assert image_problem(rng.integers(0, 256, (60, 76, 3), dtype=np.uint8), mask) is None
-    covered = taped.copy()
-    covered[mask] = rng.integers(0, 8, (mask.sum(), 3))   # noisy black where the model looks
-    # covered lens, black frame, featureless floor, glare
-    for image in (covered, np.zeros_like(floor), floor, np.full_like(floor, 255)):
-        assert image_problem(image, mask).startswith('image too dark or uniform')
-    outside = np.zeros_like(taped)
-    outside[mask] = taped[mask]   # black outside the visible region does not count
-    assert image_problem(outside, mask) is None
+def test_covered_lens_after_auto_exposure_has_no_edges_but_the_track_has():
+    """The course camera (assumed 1920x1200 calibration, 380 x 300 BEV) through the real CameraPreprocessor."""
+    cfg = config.load()
+    pre = CameraPreprocessor(ASSUMED, cfg, training_mask(cfg), 'rear_axle')
+    check = ImageCheck(pre.mask, cfg.bev.resolution_m)
+    cam = config.load()
+    cam.camera.image_width, cam.camera.image_height = pre.width, pre.height
+    lane = tape_lane(cam).astype(np.float32)
+    yy, xx = np.mgrid[:pre.height, :pre.width] - np.array([pre.height, pre.width])[:, None, None] / 2
+    cos4 = 1 / (1 + (xx ** 2 + yy ** 2) / (pre.width / 2) ** 2) ** 2   # lens shading of a 90 deg lens
+    rng = np.random.default_rng(2)
+
+    def frame(scene, noise, shading=0.):   # bayer_rggb8 the way cv_bridge converts it
+        bgr = np.broadcast_to(scene, lane.shape) * (1 - shading + shading * cos4[..., None])
+        mosaic = bgr[..., 1].copy()
+        mosaic[0::2, 0::2], mosaic[1::2, 1::2] = bgr[0::2, 0::2, 2], bgr[1::2, 1::2, 0]
+        mosaic = np.clip(mosaic + rng.normal(0, noise, mosaic.shape), 0, 255).astype(np.uint8)
+        return pre.bev(cv2.cvtColor(mosaic, cv2.COLOR_BayerBG2BGR))
+
+    # lit, high gain, dim
+    for scene, noise, shading in ((lane, 2, .3), (lane, 10, .3), (lane * .5, 6, .5)):
+        assert check(frame(scene, noise, shading)) is None
+    # Auto exposure brightens a covered lens: noise and smooth shading, which a mean/std test took for an image.
+    for scene, noise, shading in (((20, 20, 20), 10, 0.), ((40, 40, 40), 40, 0.),   # covered: auto, maximum gain
+                                  ((70, 95, 140), 2, .3),                           # palm
+                                  ((128, 128, 128), 2, 1.),                         # plain floor
+                                  ((0, 0, 0), 0, 0.), ((255, 255, 255), 0, 0.)):
+        assert check(frame(np.float32(scene), noise, shading)).startswith('no edges in view (edge ')
+
+
+def test_image_check_needs_a_visible_region_wider_than_its_blur():
+    mask = np.zeros((380, 300), bool)
+    mask[300:, 140:160] = True
+    with pytest.raises(ValueError, match='보는 영역이 너무 좁아'):
+        ImageCheck(mask, .01)
 
 
 def test_follower_orders_by_the_newest_stamp_seen_even_if_rejected():

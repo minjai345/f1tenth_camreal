@@ -12,7 +12,8 @@ PURE_PURSUIT_NODE = dict(camreal_config='data/camreal.yaml', waypoint_topic='/wa
                          wheelbase_m=0.0, steer_max_rad=0.30, max_waypoint_m=3.0, path_frame='rear_axle',
                          drive_enabled=False)
 KNOWN = {**WAYPOINT_NODE, **PURE_PURSUIT_NODE, 'use_sim_time': False}
-TEMPLATE = 'camreal/ros2/camsim_driver/config/vehicle.yaml'
+TEMPLATE, VEHICLE = 'camreal/ros2/camsim_driver/config/vehicle.yaml', 'vehicle.yaml(data/config/vehicle.yaml)'
+MAX_SPEED_MPS = 2.0   # course limit: 5.0 typed for 0.5 must not reach the motor
 
 
 def read_vehicle_yaml(path):
@@ -25,6 +26,9 @@ def read_vehicle_yaml(path):
     values = section.get('ros__parameters') if isinstance(section, dict) and len(section) == 1 else None
     if not isinstance(values, dict):
         raise ValueError(f'{path}: "/**:" 아래 "ros__parameters:" 한 섹션만 있어야 합니다. {TEMPLATE} 형식을 따르세요.')
+    if 'drive_enabled' in values:   # the launch argument overrides it silently; ros2 run with the file would drive
+        raise ValueError(f'{path}: drive_enabled는 vehicle.yaml에 두지 말고 launch 인자(drive_enabled:=true)나 '
+                         'ros2 run의 -p drive_enabled:=true로 주세요. 그 줄을 지우세요.')
     unknown = sorted(set(values) - set(KNOWN))
     if unknown:
         raise ValueError(f'{path}: 모르는 파라미터 {unknown}. 노드는 모르는 이름을 무시하므로 {TEMPLATE}의 이름으로 고치세요.')
@@ -48,7 +52,19 @@ def declare(node, defaults):
     return values
 
 
+def required(values, *keys):
+    for key in keys:
+        if not values[key]:
+            raise ValueError(f'{key} 값이 비었습니다. {VEHICLE}에 적으세요.')
+
+
 def positive(values, *keys):
     for key in keys:
         if not (math.isfinite(values[key]) and values[key] > 0):
-            raise ValueError(f'{key}={values[key]}: 0보다 큰 유한한 값이어야 합니다.')
+            raise ValueError(f'{key}={values[key]}: 0보다 큰 유한한 값을 {VEHICLE}에 적으세요.')
+
+
+def nonnegative(values, *keys):
+    for key in keys:
+        if not (math.isfinite(values[key]) and values[key] >= 0):
+            raise ValueError(f'{key}={values[key]}: 0 이상의 유한한 값을 {VEHICLE}에 적으세요.')

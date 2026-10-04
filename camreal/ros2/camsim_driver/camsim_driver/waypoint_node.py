@@ -15,9 +15,9 @@ from camsim.handoff import sha256_file
 from camreal.__main__ import load_course
 from camreal.checkpoint import load_model
 from camreal.overlay import bev_view, title_bar
-from .params import WAYPOINT_NODE as PARAMETERS, declare, positive
+from .params import WAYPOINT_NODE as PARAMETERS, VEHICLE, declare, nonnegative, positive, required
 from .preprocessing import CameraPreprocessor
-from .runtime import FrameMailbox, image_problem
+from .runtime import FrameMailbox, ImageCheck
 from .messages import CALIBRATION_TOPIC, LATCHED, decode_bgr8, make_path, make_waypoint, seconds
 from .spin import run
 
@@ -26,22 +26,27 @@ class WaypointNode(Node):
     def __init__(self, **kwargs):
         super().__init__('waypoint_node', **kwargs)
         p = declare(self, PARAMETERS)   # startup-only: no unvalidated live changes
-        for key in ('camreal_config', 'waypoint_topic', 'path_topic', 'path_frame'):
-            if not p[key]:
-                raise ValueError(f'required parameter is empty: {key}')
+        required(p, 'camreal_config', 'waypoint_topic', 'path_topic', 'path_frame')
         if p['image_qos_reliability'] not in ('best_effort', 'reliable'):
-            raise ValueError('image_qos_reliability must be best_effort or reliable')
+            raise ValueError(f'image_qos_reliability={p["image_qos_reliability"]}: best_effort 또는 reliable로 '
+                             f'{VEHICLE}에 적으세요.')
         positive(p, 'cpu_threads', 'input_timeout_s', 'max_waypoint_m')
+        nonnegative(p, 'future_tolerance_s')
         self.mailbox = FrameMailbox(p['input_timeout_s'], p['future_tolerance_s'], p['max_waypoint_m'])
         # Model, calibration and image topic come from the same file the students use.
         course = load_course(p['camreal_config'])
         self.predictor, self.cfg, mask = load_model(course['model'], p['device'], p['cpu_threads'])
-        self.preprocessor = CameraPreprocessor(course['calibration'], self.cfg, mask, p['path_frame'])
-        calibration = f'{self.preprocessor.calibration_status} {sha256_file(course["calibration"])}'
+        path, sha256 = course['calibration'], sha256_file(course['calibration'])
+        self.preprocessor = CameraPreprocessor(path, self.cfg, mask, p['path_frame'])
+        if sha256_file(path) != sha256:   # the announced SHA-256 must be the H_i2g in use
+            raise ValueError(f'캘리브레이션 파일이 읽는 동안 바뀌었습니다: {path}. 저장이 끝났으면 다시 실행하세요.')
+        self.image_check = ImageCheck(self.preprocessor.mask, self.cfg.bev.resolution_m)
+        calibration = f'{self.preprocessor.calibration_status} {sha256}'
         # Exercise the exact shape/device before publishing anything.
         probe = self.predictor.predict(np.zeros((*mask.shape, 3), dtype=np.uint8))
         if probe.shape != (2,) or not np.isfinite(probe).all():
-            raise ValueError('model startup probe failed')
+            raise ValueError(f'모델이 시험 영상에 유한한 (x, y)를 내지 않습니다: {course["model"]}. '
+                             'camsim 5장이 저장한 model.onnx와 checkpoint.json인지 확인하세요.')
         self.frame_id = p['path_frame']
         self.bridge = CvBridge()
         self.waypoint_pub = self.create_publisher(PointStamped, p['waypoint_topic'], 1)
@@ -80,8 +85,7 @@ class WaypointNode(Node):
                 return
             try:
                 bev = self.preprocessor.bev(decode_bgr8(self.bridge, frame.message))
-                # A covered lens still yields a waypoint, so the model never sees a dark or featureless view.
-                problem = image_problem(bev, self.preprocessor.mask)
+                problem = self.image_check(bev)   # a covered lens would still yield a waypoint
                 wp = None if problem else self.predictor.predict(bev)
                 if self.stop_event.is_set():
                     return
@@ -123,4 +127,4 @@ class WaypointNode(Node):
 
 
 def main(args=None):
-    run(WaypointNode, SingleThreadedExecutor, 'waypoint_node startup failed; no /waypoint', args)
+    run(WaypointNode, SingleThreadedExecutor, 'waypoint_node를 시작하지 못했습니다(/waypoint 없음)', args)
