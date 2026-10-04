@@ -3,14 +3,21 @@ import subprocess
 import sys
 import pytest
 import yaml
-from camreal.__main__ import load_course, session_name
+from camreal.__main__ import load_course, main, session_name
 
 
 def test_help_does_not_import_ros_or_torch():
     subprocess.run([sys.executable,'-c',
-        'import sys; from camreal.__main__ import main; '
-        '\ntry: main(["--help"])\nexcept SystemExit as e: assert e.code == 0\n'
+        'import sys; from camreal.__main__ import main\n'
+        'for argv in (["--help"],["calibrate","--help"]):\n'
+        '    try: main(argv)\n    except SystemExit as e: assert e.code == 0\n'
         'assert "torch" not in sys.modules; assert "rclpy" not in sys.modules'],check=True)
+
+
+@pytest.mark.parametrize('argv',[[],['calib','--image','frame.png']])
+def test_calibrate_takes_a_bag_session_or_an_image(argv,capsys):
+    with pytest.raises(SystemExit) as error:main(['calibrate',*argv,'--config','missing.yaml'])
+    assert error.value.code==2 and '하나만' in capsys.readouterr().err
 
 
 @pytest.mark.parametrize('value',['../escape','','a/b','a b'])

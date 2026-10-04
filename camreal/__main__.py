@@ -1,4 +1,4 @@
-"""Student entrypoint: python -m camreal {prepare,label,export}. Recording itself is ros2 bag record."""
+"""Student entrypoint: python -m camreal {calibrate,prepare,label,export}. Recording itself is ros2 bag record."""
 import argparse
 import math
 import os
@@ -56,7 +56,48 @@ def load_course(path):
     return c
 
 
+def calibrate(args):
+    """Week-1 ost.yaml + one floor frame -> marker clicks in the browser -> course calibration (data/calibration/car.yaml)."""
+    if (args.session is None)==(args.image is None):
+        raise ValueError('bag 세션 이름과 --image 중 하나만 지정하세요. 예: python3 -m camreal calibrate calib 또는 --image frame.png')
+    c=load_course(args.config)
+    from camreal.calibration import core
+    from camreal.calibration.server import CalibrationSession, serve
+    if not Path(args.ost).expanduser().is_file():
+        raise FileNotFoundError(f'ost.yaml이 없습니다: {args.ost}. 1주차 결과를 그 위치에 두거나 '
+                                '--ost camreal/config/ost_reference_1920x1200.yaml로 기준 파일을 지정하세요.')
+    intr=core.read_ost(args.ost)
+    print(f'ost.yaml: {rel(intr.path)} ({core.ost_kind(intr.path)}) · {intr.width}x{intr.height}',flush=True)
+    if args.image is not None:
+        source=Path(args.image).resolve()
+        frame,stamp=core.read_image(source),None
+        print(f'프레임: {rel(source)}',flush=True)
+    else:
+        source=Path(c['paths']['bags'])/session_name(args.session)
+        try:frame,stamp=core.read_bag_frame(source,c['image_topic'])
+        except ImportError as exc:
+            raise ValueError(f'bag을 읽으려면 ROS 2가 필요합니다 ({exc.name or exc} 없음). source /opt/ros/humble/setup.bash 후 다시 실행하거나 --image를 쓰세요.') from exc
+        print(f'프레임: {rel(source)}의 {c["image_topic"]} 가운데 메시지 (stamp {stamp} ns)',flush=True)
+    core.check_resolution(frame,intr)
+    if not Path(args.markers).is_file():
+        raise FileNotFoundError(f'마커 파일이 없습니다: {args.markers}. camreal/config/markers.yaml을 복사해 줄자로 잰 값으로 고치세요.')
+    markers=core.load_markers(args.markers)
+    print(f'마커: {rel(args.markers)} ({len(markers)}개)',flush=True)
+    model=Path(c['model'])
+    if (model/'checkpoint.json').is_file():
+        from camreal.checkpoint import load_config
+        cfg=load_config(model)
+        print(f'BEV 규격: {rel(model/"checkpoint.json")} (주행 모델과 같음)',flush=True)
+    else:
+        from camsim import config
+        cfg=config.load()
+        print(f'BEV 규격: camsim 기본 설정 ({rel(model)}에 checkpoint.json이 없음)',flush=True)
+    serve(CalibrationSession(intr,frame,core.undistort(frame,intr),markers,cfg,Path(c['calibration']),
+        dict(frame=str(source),frame_stamp_ns=stamp,markers=str(Path(args.markers).resolve()))),args.port)
+
+
 def run(args):
+    if args.command=='calibrate':return calibrate(args)
     c=load_course(args.config)
     projects=Path(c['paths']['projects'])
     if args.command=='prepare':
@@ -97,20 +138,27 @@ def run(args):
 
 
 def main(argv=None):
+    from camreal.calibration import WEEK1_OST
     p=argparse.ArgumentParser(description='Camreal · 3주차 실차 데이터 실습 (기록은 ros2 bag record 사용)')
     commands=p.add_subparsers(dest='command',required=True)
-    for command,help_text in [('prepare','rosbag → 원본/BEV 프레임 추출 (data/bags/세션 → data/labeling/세션)'),
+    for command,help_text in [('calibrate','1주차 ost.yaml + 바닥 마커 클릭 → 지면 캘리브레이션 (data/calibration/car.yaml)'),
+                              ('prepare','rosbag → 원본/BEV 프레임 추출 (data/bags/세션 → data/labeling/세션)'),
                               ('label','브라우저에서 1 m waypoint 라벨링'),
                               ('export','승인 라벨 → 학습용 데이터셋 (data/datasets/이름) + 현재 모델 오차')]:
         sub=commands.add_parser(command,help=help_text)
         sub.add_argument('--config',default='data/camreal.yaml',help='설정 파일')
         if command in ('prepare','label'):sub.add_argument('session',help='기록 세션 이름 (예: run_train)')
-        if command=='label':sub.add_argument('--port',type=int,default=8765)
+        if command in ('calibrate','label'):sub.add_argument('--port',type=int,default=8765)
         if command=='export':sub.add_argument('name',help='데이터셋 이름 (예: week3_real)')
+        if command=='calibrate':
+            sub.add_argument('session',nargs='?',help='주차 칸에 세우고 기록한 bag 세션 이름 (예: calib). --image와 둘 중 하나')
+            sub.add_argument('--image',help='bag 대신 쓸 원본 해상도 이미지 (PNG/JPG)')
+            sub.add_argument('--ost',default=WEEK1_OST,help='1주차 ost.yaml (기본: %(default)s)')
+            sub.add_argument('--markers',default='data/calibration/markers.yaml',help='마커 실측 좌표 (기본: %(default)s)')
     args=p.parse_args(argv)
     from camsim.config import ConfigError
     try:run(args)
-    except (ValueError,FileNotFoundError,FileExistsError,KeyError,ConfigError) as exc:p.exit(2,f'오류: {exc}\n')
+    except (ValueError,OSError,KeyError,ConfigError) as exc:p.exit(2,f'오류: {exc}\n')
 
 
 if __name__=='__main__':main()

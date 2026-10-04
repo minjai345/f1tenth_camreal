@@ -15,6 +15,7 @@ import yaml
 from camsim import camera
 from camsim.handoff import sha256_file
 from camsim.render import bev_pixels
+from camreal.calibration import WEEK1_OST
 from camreal.checkpoint import training_mask
 from camreal.overlay import TRUTH, bev_view
 from camreal.preprocessing import CameraPreprocessor
@@ -90,6 +91,14 @@ def read_ost(path):
         except ValueError:
             pass
     return Intrinsics(width, height, K, D, new_K.copy(), str(path), sha256_file(path))
+
+
+def ost_kind(path):
+    """How the CLI and the page name the ost.yaml in use: the student's week-1 file or one given with --ost."""
+    path = Path(path).expanduser().resolve()
+    if path == Path(WEEK1_OST).expanduser().resolve():
+        return '1주차 학생 파일'
+    return '기준 파일' if path.parent == Path(__file__).resolve().parents[1]/'config' else '--ost로 지정한 파일'
 
 
 def load_markers(path):
