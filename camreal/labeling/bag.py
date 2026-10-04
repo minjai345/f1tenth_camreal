@@ -11,6 +11,10 @@ from camreal.checkpoint import contract, load_config, model_files, read_manifest
 from camreal.preprocessing import CameraPreprocessor
 from .core import MODEL_DIR, write_json
 
+# Same explicit encoding policy as the live driver, without importing the ROS node.
+ENCODINGS = ('bgr8', 'rgb8', 'bgra8', 'rgba8', 'mono8',
+             'bayer_rggb8', 'bayer_bggr8', 'bayer_gbrg8', 'bayer_grbg8', 'yuv422')
+
 
 def bag_digest(root):
     """Content identity detects reuse even when a bag directory is renamed/copied."""
@@ -116,9 +120,7 @@ def extract_bag(bag_path, image_topic, model_dir, calibration_path, output,
         last_stamp = stamp
         if last_selected is not None and stamp-last_selected < round(interval_s*1e9):
             continue
-        # Same explicit encoding policy as the live driver, without importing the ROS node.
-        if message.encoding.lower() not in ('bgr8','rgb8','bgra8','rgba8','mono8',
-            'bayer_rggb8','bayer_bggr8','bayer_gbrg8','bayer_grbg8','yuv422'):
+        if message.encoding.lower() not in ENCODINGS:
             raise ValueError(f'unsupported image encoding: {message.encoding}')
         raw = bridge.imgmsg_to_cv2(message, desired_encoding='bgr8')
         bev = pre.bev(raw)

@@ -1,4 +1,32 @@
+from pathlib import Path
+import numpy as np
 import pytest
+from camsim import camera, config
+from camreal.calibration import core
+
+TEMPLATE = Path(__file__).resolve().parents[1]/'config'/'markers.yaml'
+# Week-1 slide 84 ost.yaml (cameracalibrator, 1480x1080) until the 1920x1200 reference file exists.
+OST = """image_width: 1480
+image_height: 1080
+camera_name: narrow_stereo
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [983.23425, 0., 909.40739, 0., 974.13698, 573.79454, 0., 0., 1.]
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [-0.364955, 0.124123, -0.003946, 0.000371, 0.000000]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1., 0., 0., 0., 1., 0., 0., 0., 1.]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [784.36676, 0., 950.00529, 0., 0., 849.48163, 577.98068, 0., 0., 0., 1., 0.]
+"""
 
 
 def make_model_dir(root, edit_net=None, **overrides):
@@ -28,3 +56,29 @@ def make_model_dir(root, edit_net=None, **overrides):
 @pytest.fixture
 def model_dir(tmp_path):
     return make_model_dir(tmp_path)
+
+
+def assumed(pitch=10., offset=.1, width=1480, height=1080, hfov=90.):
+    """camsim's assumed pinhole camera at the ost.yaml resolution."""
+    cfg = config.load()
+    cfg.camera.image_width, cfg.camera.image_height, cfg.camera.hfov_deg = width, height, hfov
+    cfg.camera.height_m, cfg.camera.pitch_deg, cfg.camera.offset_x_m = .2, pitch, offset
+    return cfg
+
+
+def clicks(H_g2i, markers, size=(1480, 1080)):
+    """Marker pixels a perfect clicker would give; markers outside the image are skipped."""
+    points = {k: camera.project(H_g2i, np.array(v)).tolist() for k, v in markers.items()}
+    return {k: p for k, p in points.items() if 0 <= p[0] < size[0] and 0 <= p[1] < size[1]}
+
+
+@pytest.fixture
+def ost(tmp_path):
+    path = tmp_path/'ost.yaml'
+    path.write_text(OST)
+    return path
+
+
+@pytest.fixture
+def markers():
+    return core.load_markers(TEMPLATE)[0]
