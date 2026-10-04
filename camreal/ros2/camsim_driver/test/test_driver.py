@@ -1,5 +1,3 @@
-import threading
-import time
 import cv2
 import numpy as np
 import pytest
@@ -9,84 +7,6 @@ from camsim import config, handoff, model, camera, render
 from camsim.dataset import to_tensor
 from camreal.checkpoint import load_model, training_mask
 from camsim_driver.preprocessing import CameraPreprocessor
-from camsim_driver.runtime import DriverState
-
-
-def state():
-    return DriverState(.25, .2, .02, .5, .3, .4, 6.)
-
-
-def test_pursuit_and_timestamp_expiry():
-    s = state()
-    s.offer('image', 10., 1., 10.)
-    frame = s.take()
-    assert s.complete(frame, [1., 1.], 1.01, 10.01)
-    speed, steer = s.command(1.02, 10.02)
-    # Pure pursuit straight at the waypoint: curvature 2y/L^2 = 1, steer = atan(wheelbase * 1).
-    assert speed == .5 and steer == pytest.approx(np.arctan(.3))
-    s.offer('new image', 10.19, 1.19, 10.19)  # no new inference: must expire old path
-    assert s.command(1.21, 10.21) == (0., 0.)
-    assert frame.stamp == 10.
-
-
-@pytest.mark.parametrize('wp', [[], [np.nan, 0], [1, np.inf], [-1, 0], [0, 0], [[1, 0], [2, 0]], [100, 0]])
-def test_bad_predictions_stop(wp):
-    s = state()
-    s.offer(None, 10., 1., 10.)
-    assert not s.complete(s.take(), wp, 1.01, 10.01)
-    assert s.command(1.02, 10.02) == (0., 0.)
-
-
-def test_input_loss_and_clock_pause():
-    s = state()
-    s.offer(None, 10., 1., 10.)
-    assert s.complete(s.take(), [1, 0], 1., 10.)
-    assert s.command(1.3, 10.) == (0., 0.)  # monotonic timeout even if ROS clock stalls
-
-
-def test_latest_only_and_failure_epoch():
-    s = state()
-    for i in range(10):
-        assert s.offer(i, 10. + i / 100, 1. + i / 100, 10. + i / 100)
-    frame = s.take()
-    assert frame.message == 9
-    s.fail(frame, 'network failed')
-    assert s.command(1.1, 10.1) == (0., 0.)
-    assert not s.complete(frame, [1, 0], 1.1, 10.1)
-    s.offer(11, 10.11, 1.11, 10.11)
-    assert s.complete(s.take(), [1, 0], 1.12, 10.12)
-    assert s.command(1.13, 10.13)[0] == .5
-
-
-@pytest.mark.parametrize('stamp', [0., 9., 11., np.nan, 10.])
-def test_invalid_timestamp_invalidates_running_result(stamp):
-    s = state()
-    s.offer(None, 10., 1., 10.)
-    frame = s.take()
-    assert not s.offer(None, stamp, 1.01, 10.01)
-    assert not s.complete(frame, [1, 0], 1.02, 10.02)
-    assert s.command(1.02, 10.02) == (0., 0.)
-
-
-def test_delayed_worker_does_not_block_control():
-    s = state()
-    s.offer(None, 10., 1., 10.)
-    entered, release = threading.Event(), threading.Event()
-    def worker():
-        frame = s.take()
-        entered.set()
-        release.wait(2.)
-        assert not s.complete(frame, [1, 0], 1.5, 10.5)
-    thread = threading.Thread(target=worker)
-    thread.start()
-    assert entered.wait(1.)
-    start = time.monotonic()
-    for _ in range(100):
-        assert s.command(1.4, 10.4) == (0., 0.)
-    assert time.monotonic() - start < .2
-    release.set()
-    thread.join(2.)
-    assert not thread.is_alive()
 
 
 @pytest.fixture
@@ -146,21 +66,28 @@ def test_preprocessing_matches_explicit_predictor_pipeline(model_folder, tmp_pat
     np.testing.assert_allclose(predictor.predict_camera(undistorted, pre.H),
                                predictor.predict(render.ipm_bev(undistorted, pre.H, cfg)))
     assert np.all(pre.bev(raw)[~mask] == cfg.lane.color_floor)
-    with pytest.raises(ValueError, match='resolution'):
+    # No resize/crop: the error names both sizes and the three fixes.
+    with pytest.raises(ValueError, match=r'영상 해상도\(320x200\)와 캘리브레이션 해상도\(640x400\)가 다릅니다.* '
+                                         r'1\) 카메라 해상도를 640x400에 맞추기 '
+                                         r'2\) 320x200에서 1주차 방식으로 다시 캘리브레이션.* '
+                                         r'3\) 카메라 해상도를 1920x1200에 맞추고 .*'
+                                         r'--ost camreal/config/ost_reference_1920x1200\.yaml'):
         pre.bev(raw[::2, ::2])
-    with pytest.raises(ValueError, match='ground_frame'):
+    with pytest.raises(ValueError, match=r'ground_frame\(rear_axle\)과 path_frame\(base_link\)이 같아야'):
         CameraPreprocessor(path, cfg, mask, 'base_link')
 
 
-@pytest.mark.parametrize('field,value', [('H_i2g', [[0, 0, 0]] * 3),
-                                        ('D', [float('nan')] * 5),
-                                        ('homography_space', 'raw_distorted')])
-def test_bad_calibration_rejected(model_folder, tmp_path, field, value):
+@pytest.mark.parametrize('field,value,match', [
+    ('H_i2g', [[0, 0, 0]] * 3, 'H_i2g는 유한하고 역행렬이 있는 3x3'), ('D', [float('nan')] * 5, r'D\(왜곡 계수\)'),
+    ('homography_space', 'raw_distorted', '왜곡 보정된 원본 해상도'), ('image_width', 0, 'image_width'),
+    ('distortion_model', 'equidistant', r'plumb_bob인 캘리브레이션 파일이어야 합니다\(지금 1, equidistant\)')],
+    ids=['H_i2g', 'D', 'homography_space', 'image_width', 'distortion_model'])
+def test_bad_calibration_rejected(model_folder, tmp_path, field, value, match):
     _, cfg, _ = model_folder
     path, data = calibration(tmp_path, cfg)
     data[field] = value
     path.write_text(yaml.safe_dump(data))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=match):
         CameraPreprocessor(path, cfg, training_mask(cfg), 'rear_axle')
 
 

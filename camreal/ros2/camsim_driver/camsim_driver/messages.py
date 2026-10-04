@@ -1,7 +1,7 @@
-"""ROS image conversion and visualization messages; no control feedback topic."""
+"""ROS image conversion, the /waypoint hand-off between the two nodes, and visualization messages."""
 import numpy as np
 from nav_msgs.msg import Path
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 
 
 def decode_bgr8(bridge, message):
@@ -9,8 +9,27 @@ def decode_bgr8(bridge, message):
     encoding = message.encoding.lower()
     if encoding not in ('bgr8', 'rgb8', 'bgra8', 'rgba8', 'mono8',
                         'bayer_rggb8', 'bayer_bggr8', 'bayer_gbrg8', 'bayer_grbg8', 'yuv422'):
-        raise ValueError(f'unsupported image encoding: {encoding}; configure camera to 8-bit')
+        raise ValueError(f'지원하지 않는 영상 encoding입니다: {encoding}. '
+                         '카메라를 8-bit 형식(bayer_rggb8, bgr8, mono8 등)으로 설정하세요.')
     return bridge.imgmsg_to_cv2(message, desired_encoding='bgr8')
+
+
+def seconds(stamp):
+    return stamp.sec + stamp.nanosec * 1e-9
+
+
+def make_waypoint(stamp, frame_id, wp):
+    """/waypoint: predicted pure pursuit target (x, y, z = 0) stamped with the source image capture time."""
+    wp = np.asarray(wp, dtype=float).reshape(2)
+    msg = PointStamped()
+    msg.header.stamp, msg.header.frame_id = stamp, frame_id
+    msg.point.x, msg.point.y = float(wp[0]), float(wp[1])
+    return msg
+
+
+def read_waypoint(msg):
+    """-> (stamp in seconds, frame_id, waypoint (x, y) in metres)."""
+    return seconds(msg.header.stamp), msg.header.frame_id, np.array([msg.point.x, msg.point.y])
 
 
 def make_path(stamp, frame_id, wp):

@@ -16,7 +16,7 @@ def test_assumed_projection_and_preview_only(tmp_path,width,height):
     uv=np.array([[width/2,height/2+width/2*.2]])
     np.testing.assert_allclose(camera.project(pre.H,uv),[[1.,0.]],atol=1e-12)
     assert pre.bev(np.zeros((height,width,3),np.uint8)).shape==(*render.bev_size(cfg),3)
-    with pytest.raises(ValueError,match='preview-only'):pre.require_driving_calibration()
+    with pytest.raises(ValueError,match='미리보기 전용'):pre.require_driving_calibration()
 
 
 def test_assumed_invalid_parameters():

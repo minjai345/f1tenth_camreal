@@ -13,6 +13,7 @@ setup(
                 ('share/camsim_driver/launch', glob('launch/*.launch.py'))],
     install_requires=['setuptools', 'numpy', 'PyYAML'],
     zip_safe=False, maintainer='camsim maintainers', maintainer_email='maintainers@example.com',
-    description='Camera BEV waypoint inference and pure pursuit in one ROS 2 node',
-    license='MIT', entry_points={'console_scripts': ['camsim_driver_node = camsim_driver.node:main']},
+    description='Camera BEV waypoint inference (waypoint_node) and pure pursuit (pure_pursuit_node), ROS 2',
+    license='MIT', entry_points={'console_scripts': ['waypoint_node = camsim_driver.waypoint_node:main',
+                                                     'pure_pursuit_node = camsim_driver.pure_pursuit_node:main']},
 )
