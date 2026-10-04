@@ -354,6 +354,17 @@ def test_missing_ost_offers_the_reference_only_when_there_is_one(tmp_path, monke
     assert '--ost camreal/config/ost_reference_1920x1200.yaml' in capsys.readouterr().err
 
 
+def test_missing_reference_is_the_tas_file_not_a_place_for_the_week1_one(tmp_path, monkeypatch, capsys):
+    # The students' reference command before section 7: copying a week-1 file there would block the later git pull.
+    monkeypatch.setattr(core, 'REFERENCE', tmp_path/'ost_reference_1920x1200.yaml')
+    with pytest.raises(SystemExit) as error:
+        calibrate_here(monkeypatch, 'calib', '--ost', os.path.relpath(tmp_path/'ost_reference_1920x1200.yaml'),
+                       '--config', course(tmp_path, tmp_path/'no_model'))
+    err = capsys.readouterr().err
+    assert error.value.code == 2 and '기준 ost.yaml이 아직 레포에 없습니다' in err and '조교' in err
+    assert '1주차 결과를 그 위치에' not in err
+
+
 def test_calibrate_command_reads_the_middle_bag_frame(session, points, tmp_path):
     rosbag = pytest.importorskip('rosbag2_py')
     from rclpy.serialization import serialize_message

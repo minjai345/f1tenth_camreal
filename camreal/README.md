@@ -45,6 +45,8 @@ sessions:
 
 ## 설치 (차마다 한 번, 맨 처음)
 
+조교가 설치해 둔 차(수업 때는 보통 이쪽)는 맨 아래 [5. 확인](#5-확인)만 하고, 결과가 다르면 손 들기.
+
 1주차(ROS 2 Humble, 카메라 드라이버)와 2주차(onnxruntime-gpu, torch)에 깐 것 위에 아래만 더 깔면 됨. 위에서부터 순서대로, 모두 **T5**.
 
 ### 1. 레포 받기
@@ -103,7 +105,7 @@ pip3 install "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/62a/1beee9f2f1470/torch
 
 ### 4. 차량 스택, 주행 노드, 차 번호
 
-[차량 스택 설치 문서](CAR_STACK.md)의 2~6단계를 그대로 (f1tenth_system 받기·빌드, 주행 노드 빌드, VESC 장치 이름 등록).
+[차량 스택 설치 문서](CAR_STACK.md)의 0~6단계를 그대로 (설치 여부 확인, f1tenth_system 받기·빌드, 주행 노드 빌드, VESC 장치 이름 등록).
 
 그다음 차마다 ROS 도메인을 나눔 ([CAR_STACK.md](CAR_STACK.md) 7단계와 같음). 수업에서는 여러 차가 한 공유기를 써서,
 도메인이 같으면 다른 차의 `/drive`와 `/joy`(조이스틱)가 이 차를 움직임. 차에 붙은 차 번호(1~101)를 넣을 것.
@@ -191,7 +193,8 @@ ros2 bag record --storage sqlite3 \
   --output data/bags/calib /flir_camera/image_raw /flir_camera/camera_info
 ```
 
-다시 기록할 때는 이름을 바꿀 것 (`calib2`, 아래 클릭 도구 명령도 `calib2`로). 같은 이름이면 `already exists` 오류.
+다시 기록할 때나 `already exists` 오류가 나올 때는 이름을 바꿀 것 (`calib2`, 아래 클릭 도구 명령도 `calib2`로).
+처음인데 이 오류가 나오면 이 차에서 누가 먼저 `calib`로 기록한 것이니 그대로 `calib2`로.
 
 ### 1-2. 마커 클릭
 
@@ -251,7 +254,7 @@ python3 -m camreal calibrate calib
 - `둘러싸지 못합니다` 노랑 메시지: 메시지에 적힌 쪽(예: `x ≥ 1 m 왼쪽`)의 마커를 더 찍기. 영상에 안 보이면 손 들기
 - 차가 칸에서 1° 틀어지면 2 m 앞에서 3.5 cm 어긋남 → 차를 다시 세우고 1-1부터 (새 이름으로 기록)
 - 카메라 마운트를 건드렸으면 1단계 처음부터 다시
-- `설정 파일이 없습니다`, `마커 파일이 없습니다` → 손 들기 (조교 준비물)
+- `설정 파일이 없습니다`, `마커 파일이 없습니다`, `기준 ost.yaml이 아직 레포에 없습니다` → 손 들기 (조교 준비물)
 
 ## 2. 예측만 보기
 
@@ -296,6 +299,7 @@ ros2 run rqt_image_view rqt_image_view /camsim_driver/bev
 - 자홍 점이 좌우 테이프 가운데에 있으면 정상
 - 점이 화면 밖이면 가장자리에 빈 원으로 표시됨
 - 위쪽 글자: 예측 좌표(m)와 상태. `valid`가 정상. 다른 글자면 `/waypoint`가 나가지 않고 차는 멈춤 → 손 들기
+- 화면이 회색: 새 화면이 안 나오는 중 (카메라가 꺼졌으면 `no image`). 위쪽 글자는 이유와 몇 초째인지. 차는 멈춤 → 손 들기
 
 **T5** 좌표 보기 (다 봤으면 Ctrl+C):
 
@@ -340,6 +344,7 @@ source install/setup.bash
 ros2 launch camsim_driver camsim_driver.launch.py drive_enabled:=true
 ```
 
+- `준비됨:` 줄이 두 개 나와야 함. 그 전에 launch가 끝나면 위로 올려서 `시작하지 못했습니다` 줄을 찾아 손 들기
 - 조이스틱은 RB만 누르고 있기. RB를 누르고 있는 동안 모델 명령대로 달림
 - LB가 아닌 다른 버튼(A·B·X·Y 등)을 눌러도 똑같이 달림. 주행 중에는 RB 말고 아무 버튼도 누르지 말 것
 - LB를 누른 채 스틱: 수동 운전 (자율주행보다 우선). 스틱을 끝까지 밀면 최대 약 5 m/s라 살살

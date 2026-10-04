@@ -14,6 +14,6 @@ setup(
     install_requires=['setuptools', 'numpy', 'PyYAML'],
     zip_safe=False, maintainer='camsim maintainers', maintainer_email='maintainers@example.com',
     description='Camera BEV waypoint inference (waypoint_node) and pure pursuit (pure_pursuit_node), ROS 2',
-    license='MIT', entry_points={'console_scripts': ['waypoint_node = camsim_driver.waypoint_node:main',
-                                                     'pure_pursuit_node = camsim_driver.pure_pursuit_node:main']},
+    license='MIT', entry_points={'console_scripts': ['waypoint_node = camsim_driver.spin:waypoint_node',
+                                                     'pure_pursuit_node = camsim_driver.spin:pure_pursuit_node']},
 )

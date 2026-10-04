@@ -31,9 +31,15 @@ git pull jt main     # camsim 업데이트. 그다음 colcon build 다시 (아�
 ### 1. ROS 패키지와 차량 스택
 
 학생이 직접 설치할 때는 [차량 스택 설치 문서](CAR_STACK.md)를 따라 하게 한다(명령 복사로 끝나게 작성, 새 폴더 빌드로 검증함).
-아래는 같은 내용의 요약이다.
 차가 여러 대면 차마다 `ROS_DOMAIN_ID`를 다르게 둔다(CAR_STACK.md 7단계, 학생 문서 설치 4번). 같은 공유기에서 같은 ID면 다른 차의 `/drive`와
 `/joy`가 이 차를 움직이고, 주행 노드는 다른 차의 `/waypoint` 때문에 속도 0에 머문다.
+학생 문서는 차에 붙은 라벨을 읽게 하니 차마다 라벨 세 개를 붙인다.
+
+- 차 번호(1~101, 차마다 다르게): 설치 4번에서 `ROS_DOMAIN_ID`로 넣는 수. 조교가 설치할 때도 이 번호를 넣는다
+- 카메라 serial: 0단계 launch의 `serial` 값(1주차 launch에 쓴 값 또는 SpinView)
+- 렌즈 높이: 4번의 5
+
+아래는 차량 스택 설치 문서의 요약이다.
 
 ```bash
 sudo apt update && sudo apt install -y ros-humble-ackermann-msgs ros-humble-serial-driver ros-humble-urg-node \
@@ -115,7 +121,8 @@ cp -n camreal/ros2/camsim_driver/config/vehicle.yaml data/config/vehicle.yaml
 
 **기준 ost.yaml (한 번).** 학생 문서에서는 이 파일이 보통 경로다(`--ost camreal/config/ost_reference_1920x1200.yaml`).
 1주차 72쪽에서 해상도를 1280×720으로 바꾼 뒤 캘리브레이션한 학생 파일은 3주차 영상(1920×1200)과 해상도가 달라 `calibrate`가 거부한다.
-이 파일을 커밋하기 전에는 학생 문서의 기준 파일 명령이 `ost.yaml이 없습니다`로 멈춘다.
+이 파일을 커밋하기 전에는 학생 문서의 기준 파일 명령이 `기준 ost.yaml이 아직 레포에 없습니다`로 멈춘다(학생 문서는 손 들기로 안내).
+커밋하기 전에 레포를 받은 차는 `cd ~/f1tenth_gym && git pull`로 받는다.
 같은 카메라·렌즈 모델이고 초점 링을 고정했다는 전제다. 3주차 해상도(1920×1200)로 1주차 방식 그대로 캘리브레이션한다.
 먼저 카메라 launch(`/opt/ros/humble/share/spinnaker_camera_driver/launch/driver_node.launch.py`)의 `image_width`·`image_height`를
 1920·1200(offset 0)으로 두고 `ros2 topic echo /flir_camera/image_raw --once --field width`로 확인한다. 모든 차를 이 해상도로 맞춘다.
@@ -137,7 +144,7 @@ GUI의 scale 슬라이더는 0에 둔 채 SAVE한다(슬라이더가 P를 바꾼
 3. `mkdir -p data/calibration && cp camreal/config/markers.yaml data/calibration/markers.yaml` 후 템플릿 위치
    (x 0.6/1.0/1.5/2.0 m, y +0.4/0/−0.4 m)에 테이프 십자 12개를 붙인다. 카메라 화면에 안 들어오는 마커는 화면 안으로 옮긴다
 4. 줄자로 각 십자 중심을 재서 `data/calibration/markers.yaml`의 값을 실측값으로 고친다 (x는 후륜축 선에서 앞쪽, y는 중심선에서 왼쪽 +, 단위 m)
-5. 차마다 카메라 렌즈 중심 높이를 재서 라벨로 붙인다(학생 1단계 확인 2). `calibrate`가 추정한 높이와 2 cm 안으로 맞아야 한다
+5. 차마다 카메라 렌즈 중심 높이를 재서 1번의 차 번호·카메라 serial 옆에 라벨로 붙인다(학생 1단계 확인 2). `calibrate`가 추정한 높이와 2 cm 안으로 맞아야 한다
 6. 같은 주차 칸을 쓰는 차에는 같은 `markers.yaml`을 `data/calibration/`에 복사한다
 
 마커는 1 m 앞 waypoint 자리를 둘러싸야 한다. x ≤ 1 m 쪽과 x ≥ 1 m 쪽 각각에 왼쪽(y ≥ 0.2 m)과 오른쪽(y ≤ −0.2 m) 마커가
@@ -145,13 +152,16 @@ GUI의 scale 슬라이더는 0에 둔 채 SAVE한다(슬라이더가 P를 바꾼
 `markers.yaml`은 단위 m로 6개 이상, x > 0, 좌표 중복 없이, 두 줄 이상에 나눠 적어야 `calibrate`가 시작한다.
 `calibrate` 실행 중에 이 파일을 고치면 저장이 거부되니 `calibrate`를 다시 실행한다.
 
-**차마다 한 번 미리 해 보기.** 2번 모델과 3번 설정 파일을 둔 뒤 학생 문서 0~1단계를 그대로 한다.
+**차마다 한 번 미리 해 보기.** 2번 모델과 3번 설정 파일을 둔 뒤 학생 문서 0~1단계를 그대로 하되, 기록 이름 `calib`는 `calib_ta`로
+바꾼다(1-1의 `--output data/bags/calib_ta`, 1-2의 `calibrate calib_ta`). `calib`를 남기면 수업에서 학생의 1-1 기록이 `already exists`로 멈추고,
+`calibrate calib`가 조교의 영상을 띄운다(같은 브라우저면 조교가 찍은 점까지). 이미 `calib`로 했으면 `mv data/bags/calib data/bags/calib_ta`.
 1 m 근처(A·B줄) 마커 오차가 3 cm를 넘으면 마커 실측값, 주차 자세, 클릭 위치 순으로 다시 확인한다.
 카메라 높이가 음수로 나오면(저장 안 됨) 마커 y 부호나 [x, y] 순서가 틀린 것이다.
 여기서 저장한 `car.yaml`은 수업 중 학생의 1단계가 막혔을 때 그대로 쓰인다.
 
 실측 캘리브레이션 전에 연결만 볼 때는 가정값을 쓴다(주행 불가). `data/camreal.yaml`의 `calibration`을 이 파일로 바꿔 쓰고,
-실측한 뒤 `data/calibration/car.yaml`로 되돌린다.
+`calibrate`를 실행하기 **전에** `data/calibration/car.yaml`로 되돌린다. `calibrate`는 `calibration`이 가리키는 파일에 저장한다(터미널의 `저장 위치`,
+화면의 `저장:`). 되돌리지 않으면 실측값이 `ASSUMED_camera.yaml`에 저장되고 `car.yaml`은 생기지 않는다.
 
 ```bash
 cd ~/f1tenth_gym
@@ -165,9 +175,12 @@ python3 -m camreal.tools.make_assumed_calibration --out data/calibration/ASSUMED
 
 ### 5. 사전 점검 (수업 전, 시뮬 모델이 실차에서 되는지 판정)
 
-학생 문서를 그대로 따라간다. 안 될 때 캘리브레이션 문제인지 모델 문제인지 가르는 것이 목적이다.
+학생 문서를 그대로 따라간다. 1단계는 4번 미리 해 보기의 결과를 쓰고, 다시 하면 기록 이름은 `calib_ta2`처럼 학생의 `calib`와 겹치지 않게 한다.
+안 될 때 캘리브레이션 문제인지 모델 문제인지 가르는 것이 목적이다.
 시뮬 모델은 학생과 같은 기본 설정으로 Colab 1~5장을 돌린 것을 쓴다(2번).
-트랙 테이프 색·폭, 차선 폭, 바닥색이 시뮬 기본값(노란 5 cm, 0.8 m, 회색)과 크게 다르면 먼저 Colab 파라미터를 맞춰 다시 학습한다.
+트랙 테이프 색·폭, 바닥색이 시뮬 기본값(노란 5 cm 테이프, 회색 바닥)과 크게 다르면 먼저 Colab 파라미터를 맞춰 다시 학습한다.
+차선 폭은 기본값(`lane.follow_walls: true`)에서 테이프가 맵 벽을 따라가 구간마다 다르다. `track_width_m`(0.8 m)은 `follow_walls: false`일 때만 쓰인다.
+실제 트랙처럼 폭이 일정한 차선으로 다시 학습하려면 `follow_walls: false`, `track_width_m` = 실제 차선 폭으로 둔다.
 
 | 학생 단계 | 할 일 | 합격 기준 |
 |---|---|---|
@@ -177,7 +190,7 @@ python3 -m camreal.tools.make_assumed_calibration --out data/calibration/ASSUMED
 | 2 | 직선 가운데에 똑바로 세우고 예측만 보기 | BEV에서 테이프 평행, 간격 = 실제 폭, `/waypoint` y ≈ 0 |
 | 2 | 손으로 밀며 직선·코너·치우친 자세. 동시에 4단계 명령으로 `run_pilot` 기록 | 예측점이 차선 가운데 쪽 |
 | 2 (선택) | 손으로 밀며 불 끄기, 손전등, 그림자 | 메모 (주행은 평소 조명에서만) |
-| 3 전 | 바퀴 띄우고 주행 켬 + RB: 조향 방향(점이 왼쪽이면 바퀴도 왼쪽), RB를 떼면 정지, RB를 누른 채 LB+스틱이면 수동이 우선, T1 카메라를 Ctrl+C로 끄면 속도 0, T3 Ctrl+C면 속도 0으로 끝남, `ros2 topic hz /joy` 약 20 Hz | 전부 정상 |
+| 3 전 | 바퀴 띄우고 주행 켬 + RB: 조향 방향(점이 왼쪽이면 바퀴도 왼쪽), RB를 떼면 정지, RB를 누른 채 LB+스틱이면 수동이 우선, T1 카메라를 Ctrl+C로 끄면 속도 0(BEV는 회색 `no image`), T3 Ctrl+C면 속도 0으로 끝남, `ros2 topic hz /joy` 약 20 Hz | 전부 정상 |
 | 3 | 0.5 m/s, RB | 평소 조명에서 개입 없이 3바퀴 연속 |
 
 판정:
@@ -187,7 +200,10 @@ python3 -m camreal.tools.make_assumed_calibration --out data/calibration/ASSUMED
 - 2단계 BEV는 맞는데 예측·주행이 틀림 → 모델 문제
   1. 시뮬을 실차에 맞춰 재학습: 트랙 파라미터 + `car.yaml`의 `camera_pose_estimate`
      (`height_m`, `pitch_deg`, `hfov_deg`, `x_m` → camsim `camera.height_m`, `camera.pitch_deg`, `camera.hfov_deg`, `camera.offset_x_m`)
-  2. 그래도 안 되면 `run_pilot` bag으로 5~7단계를 해 보고, 3주차에 실차 데이터 수집(4~7단계)을 넣는다
+  2. 그래도 안 되면 `run_pilot` bag으로 5~6단계(추출·라벨링)를 해 보고, 3주차에 실차 데이터 수집(4~7단계)을 넣는다.
+     7단계(export, 시뮬 모델의 실데이터 오차)는 bag 하나로는 안 된다. `sessions`에 적힌 세션만 읽고, train·val에 서로 다른 주행 bag이 필요하다.
+     하려면 다른 주행을 `run_pilot_val`로 하나 더 기록해 5~6단계를 똑같이 하고, `sessions`를 train `[run_pilot]`, val `[run_pilot_val]`로
+     바꿔 export한다(수업 전에 되돌린다)
 
 주행 안전: [ROS 문서의 실차 확인 순서](ros2/camsim_driver/README.md#실차-확인-순서)대로 바퀴를 띄운 상태부터 시작한다.
 자율주행은 조이스틱 **RB를 누르고 있는 동안** 전달된다(LB는 수동 운전). LB가 아닌 다른 버튼을 눌러도 똑같이 전달되니 주행 중에는 RB만 누르게 한다.

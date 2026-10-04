@@ -65,6 +65,9 @@ def calibrate(args):
     from camreal.calibration.server import CalibrationSession, serve
     ost=Path(args.ost).expanduser()
     if not ost.is_file():
+        if ost.resolve()==core.REFERENCE.resolve():   # the TA has not committed it yet (spec section 7)
+            raise FileNotFoundError(f'기준 ost.yaml이 아직 레포에 없습니다: {args.ost}. 조교가 넣을 파일이니 조교에게 알리세요'
+                                    ' (1주차 파일을 이 위치에 복사하지 마세요).')
         option=core.reference_option(ost)
         raise FileNotFoundError(f'ost.yaml이 없습니다: {args.ost}. 1주차 결과를 그 위치에 두세요'+(f' (또는 {option}로 기준 파일 지정).' if option else '.'))
     intr=core.read_ost(ost)

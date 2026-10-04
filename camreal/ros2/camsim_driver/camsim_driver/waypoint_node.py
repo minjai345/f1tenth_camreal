@@ -4,6 +4,7 @@ import time
 import cv2
 import numpy as np
 from rclpy.node import Node
+from rclpy.clock import Clock, ClockType
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image
@@ -46,7 +47,12 @@ class WaypointNode(Node):
         self.path_pub = self.create_publisher(Path, p['path_topic'], 1)
         self.debug_pub = (self.create_publisher(Image, p['debug_image_topic'], 1)
                           if p['debug_image_topic'] and p['debug_image_hz'] > 0 else None)
-        self.debug_period, self.last_debug = 1.0 / max(p['debug_image_hz'], 1e-6), 0.0
+        self.debug_period, self.last_debug = 1.0 / max(p['debug_image_hz'], 1e-6), time.monotonic()
+        self.last_image = self.last_debug
+        if self.debug_pub is not None:   # the worker publishes no BEV for a dropped or failed frame
+            self.debug_lock, self.stale_after = threading.Lock(), self.debug_period + p['input_timeout_s']
+            self.view = self.shrink(bev_view(np.full((*mask.shape, 3), self.cfg.lane.color_floor, np.uint8), self.cfg))
+            self.create_timer(self.debug_period, self.publish_stale, clock=Clock(clock_type=ClockType.STEADY_TIME))
         qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
                          reliability=(ReliabilityPolicy.BEST_EFFORT if p['image_qos_reliability'] == 'best_effort'
                                       else ReliabilityPolicy.RELIABLE), durability=DurabilityPolicy.VOLATILE)
@@ -63,8 +69,8 @@ class WaypointNode(Node):
         return self.get_clock().now().nanoseconds * 1e-9
 
     def on_image(self, msg):
-        stamp, ros_now = seconds(msg.header.stamp), self.ros_seconds()
-        if not self.mailbox.offer(msg, stamp, time.monotonic(), ros_now):
+        stamp, ros_now, self.last_image = seconds(msg.header.stamp), self.ros_seconds(), time.monotonic()
+        if not self.mailbox.offer(msg, stamp, self.last_image, ros_now):
             reason = self.mailbox.reason
             hint = ' bag이나 시계를 되감았으면 노드를 다시 시작하세요.' if reason.startswith('non-increasing') else ''
             self.get_logger().warning(f'영상 버림: {reason} (영상 나이 {ros_now - stamp:.3f} s).{hint}',
@@ -92,19 +98,39 @@ class WaypointNode(Node):
             if reason != self.last_reason and log.info(f'예측: {reason}', throttle_duration_sec=1.0):
                 self.last_reason = reason   # a change hidden by the throttle is logged once it expires
 
+    @staticmethod
+    def shrink(view):
+        scale = 400 / max(view.shape[:2])   # 380 x 300 BEV stays full size; finer BEVs are shrunk
+        return cv2.resize(view, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else view
+
     def publish_debug(self, frame, bev, wp):
         """What the model sees (long side at most 400 px) with its waypoint: watch it change with lighting."""
         now = time.monotonic()
         if self.debug_pub is None or now - self.last_debug < self.debug_period:
             return
-        self.last_debug = now
-        view = bev_view(bev, self.cfg, wp)
-        scale = 400 / max(view.shape[:2])
-        if scale < 1:   # 380 x 300 BEV stays full size; finer BEVs are shrunk
-            view = cv2.resize(view, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        title_bar(view, f'x {wp[0]:.2f} y {wp[1]:+.2f} m | {self.mailbox.reason}')
+        view = self.shrink(bev_view(bev, self.cfg, wp))
+        with self.debug_lock:
+            self.last_debug, self.view = now, view.copy()
+            self.send_debug(title_bar(view, f'x {wp[0]:.2f} y {wp[1]:+.2f} m | {self.mailbox.reason}'),
+                            frame.message.header.stamp)
+
+    def publish_stale(self):
+        """No new BEV (camera stopped, frames dropped, inference failing): the last one in grey, why and how long."""
+        with self.debug_lock:
+            now = time.monotonic()
+            if now - self.last_debug <= self.stale_after:
+                return
+            why = self.mailbox.reason
+            if now - self.last_image > self.stale_after:
+                why = 'no image'
+            elif why == 'valid':   # images arrive, the worker has returned nothing since
+                why = 'inference stalled'
+            view = cv2.cvtColor(cv2.cvtColor(self.view, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+            self.send_debug(title_bar(view, f'{why} | {now - self.last_debug:.1f} s'), self.get_clock().now().to_msg())
+
+    def send_debug(self, view, stamp):
         msg = self.bridge.cv2_to_imgmsg(view, encoding='bgr8')
-        msg.header.stamp, msg.header.frame_id = frame.message.header.stamp, self.frame_id
+        msg.header.stamp, msg.header.frame_id = stamp, self.frame_id
         self.debug_pub.publish(msg)
 
     def destroy_node(self):

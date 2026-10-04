@@ -123,7 +123,7 @@ ros2 launch f1tenth_stack bringup_launch.py
 | RB 누르고 있는 동안 | 자율주행 명령(`/drive`) 전달 |
 | 버튼에서 손 뗌 | 정지 |
 
-- 다른 버튼을 눌러도 `/drive`가 전달됨. RB만 쓸 것
+- LB가 아닌 다른 버튼(A·B·X·Y 등)을 눌러도 `/drive`가 전달됨. RB만 쓸 것
 - 조이스틱이 끊기면 버튼 없이도 `/drive`가 전달됨. 자율주행 전에 `ros2 topic hz /joy`로 약 20 Hz 나오는지 확인
 - VESC, LiDAR가 연결 안 돼 있으면 `Failed to connect to the VESC`, `Error connecting to Hokuyo` 오류가 뜸. 나머지 노드는 정상
 
