@@ -109,7 +109,7 @@ def test_session_page_and_image(server, session):
     assert s['markers'][0] == dict(id='A1', x=.6, y=.4) and [m['id'] for m in s['markers']] == list(session.markers)
     assert (s['ost'], s['ost_kind'], s['frame'], s['out']) == (session.intr.path, '--ost로 지정한 파일', session.source['frame'],
                                                                str(session.out_path))
-    assert (s['warn_cm'], s['reject_cm'], s['min_fit'], s['min_loo'], s['min_save']) == (5., 20., 4, 5, 6)
+    assert (s['warn_cm'], s['reject_cm'], s['pass_cm'], s['min_fit'], s['min_loo'], s['min_save']) == (5., 20., 3., 4, 5, 6)
     assert s['hfov_deg'] == pytest.approx(math.degrees(2 * math.atan(740 / 784.36676)), abs=.05) and len(s['token']) > 30
     assert s['bev'] == dict(x_range_m=[.2, 4.], y_range_m=[-1.5, 1.5], resolution_m=.01)   # the course model's BEV
     status, headers, body = request(server, 'GET', '/image/undistorted.png')
@@ -208,6 +208,13 @@ def test_fit_grows_with_the_clicks(server, session, points):
     for name, color in (('B2', (0, 200, 0)), ('C2', (200, 200, 200))):   # clicked green, not clicked grey
         u, v = np.rint(render.bev_pixels(np.array(session.markers[name]), session.cfg)).astype(int)
         assert tuple(int(c) for c in bev[v, u]) == color
+    assert r['warned'] == [] and r['uncovered'] == ['near-right']   # A3 is out of view and B3 not clicked yet
+
+
+def test_fit_judges_coverage_at_the_course_ahead_m(session, points):
+    session.cfg.waypoints.ahead_m = 2.5   # a course model predicting 2.5 m ahead: no clicked marker lies beyond
+    result = calibration_server.fit(session, points)[0]
+    assert result['savable'] and result['uncovered'] == ['far-left', 'far-right'] and '2.5 m' in result['reason']
 
 
 def test_preview_the_car_would_reject_blocks_saving(server, session, points, monkeypatch):

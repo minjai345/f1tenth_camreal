@@ -4,7 +4,7 @@
 </style>
 <header><h1>Camreal 지면 캘리브레이션</h1><span id="ost"></span><span id="size"></span><span id="frame"></span><span id="out"></span></header>
 <main><div class="layout"><section class="pane"><h2 id="hint">왜곡 보정 영상</h2><canvas id="canvas" aria-label="왜곡 보정 영상"></canvas>
-<p>목록에서 고른 마커의 십자 중심을 클릭하면 찍히고 다음 미작업 마커로 넘어갑니다. 찍은 점은 드래그로 옮기고 <kbd>←</kbd> <kbd>↑</kbd> <kbd>→</kbd> <kbd>↓</kbd>로 1 px씩 움직입니다. 커서 옆 돋보기는 원본 해상도의 4배입니다.</p></section>
+<p>목록에서 고른 마커의 십자 중심을 클릭하면 찍히고 다음 미작업 마커로 넘어갑니다. 영상에 안 보이는 마커는 건너뛰기(<kbd>S</kbd>)를 누르세요. 찍은 점은 드래그로 옮기거나, 마우스를 영상 위에 둔 채 <kbd>←</kbd> <kbd>↑</kbd> <kbd>→</kbd> <kbd>↓</kbd>로 1 px씩 움직입니다. 커서 옆 돋보기는 원본 해상도의 4배입니다.</p></section>
 <section class="pane"><h2>마커 (후륜축 중심 기준 m, x 전방 · y 왼쪽)</h2>
 <table><thead><tr><th>id</th><th class="num">x</th><th class="num">y</th><th>상태</th><th class="num">오차</th></tr></thead><tbody id="list"></tbody></table>
 <div class="tools"><button id="skip">건너뛰기 <kbd>S</kbd></button><button id="clear">지우기 <kbd>Del</kbd></button></div>

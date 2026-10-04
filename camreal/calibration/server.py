@@ -65,7 +65,7 @@ def parse_points(value, session):
 
 def fit(session, points):
     """core.evaluate + the car's BEV as a PNG data URL -> (JSON-safe result, preview BGR or None)."""
-    result = dict(core.evaluate(points, session.markers, session.intr), bev=None)
+    result = dict(core.evaluate(points, session.markers, session.intr, float(session.cfg.waypoints.ahead_m)), bev=None)
     if result['H_i2g'] is None:
         return result, None
     try:
@@ -83,7 +83,7 @@ def make_server(session, port=0):
     info = dict(width=intr.width, height=intr.height, markers=[dict(id=k, x=x, y=y) for k, (x, y) in session.markers.items()],
                 ost=intr.path, ost_kind=core.ost_kind(intr.path), frame=str(session.source['frame']), out=str(session.out_path),
                 image_sha256=hashlib.sha256(image).hexdigest(), hfov_deg=core.hfov_deg(intr), bev=asdict(session.cfg.bev),
-                warn_cm=core.WARN_CM, reject_cm=core.REJECT_CM, min_fit=core.MIN_FIT, min_loo=core.MIN_LOO,
+                warn_cm=core.WARN_CM, reject_cm=core.REJECT_CM, pass_cm=core.PASS_CM, min_fit=core.MIN_FIT, min_loo=core.MIN_LOO,
                 min_save=core.MIN_SAVE, ahead_m=float(session.cfg.waypoints.ahead_m), token=token)
 
     class Handler(BaseHTTPRequestHandler):

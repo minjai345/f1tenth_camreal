@@ -90,6 +90,8 @@ GOOD = {'M0': [.5, .4], 'M1': [.5, 0.], 'M2': [.5, -.4], 'M3': [.8, .4], 'M4': [
     (lambda m: m.update(M0='1, 2'), 'M0'),
     (lambda m: m.update(M0=[0., .1]), 'M0'),
     (lambda m: m.update(M0=list(m['M4'])), 'M4'),
+    (lambda m: m.update(M0=[60, 40]), 'M0.*단위는 m'),   # the tape reading in cm
+    (lambda m: m.update(M0=[.5, -6.]), 'M0.*단위는 m'),
     (lambda m: m.update({k: [.5 + .1 * i, 0.] for i, k in enumerate(m)}), '한 줄'),   # no H from any clicks
     (lambda m: m.update({k: [.5 + .1 * i, 0.] for i, k in enumerate(list(m)[:5])}), '한 줄'),
 ])
@@ -243,6 +245,59 @@ def test_one_misclick_is_named_even_when_it_bends_every_other_fit(ost, markers):
     assert core.evaluate(points, markers, intr)['suspect'] is None
 
 
+def test_suspect_names_no_marker_it_cannot_prove(ost, markers):
+    cfg = assumed()
+    points = clicks(camera.build(cfg)[0], markers)
+    intr = dataclasses.replace(core.read_ost(ost), new_K=camera.intrinsics(cfg))
+    # 5 clicks: every removal leaves 4 points, which any H fits exactly. B2 on C1's cross named the good A1.
+    five = dict({k: points[k] for k in ('A1', 'A2', 'A3', 'B1')}, B2=points['C1'])
+    result = core.evaluate(five, markers, intr)
+    assert core.suspect(five, markers) is None and result['suspect'] is None and '마커가 틀린' not in result['reason']
+    # D3 on D2's cross: removing D3 leaves A1 B1 C1 D1 on one line, so D3 cannot be tested. The good D1 was named.
+    six = dict({k: points[k] for k in ('A1', 'A3', 'B1', 'C1', 'D1')}, D3=points['D2'])
+    assert core.suspect(six, markers) is None and core.evaluate(six, markers, intr)['suspect'] is None
+
+
+def test_a_savable_slip_is_warned_and_named(ost, markers):
+    cfg = assumed()
+    H_g2i = camera.build(cfg)[0]
+    points = clicks(H_g2i, markers)
+    intr = dataclasses.replace(core.read_ost(ost), new_K=camera.intrinsics(cfg))
+    assert core.evaluate(points, markers, intr)['warned'] == []
+
+    def slip(dx, dy):   # A3 clicked on its tape arm instead of the cross centre
+        return dict(points, A3=camera.project(H_g2i, np.add(markers['A3'], [dx, dy])).tolist())
+    # 12 cm ahead: savable (spec 4.5: over 5 cm only warns), but never the green "저장 가능".
+    result = core.evaluate(slip(.12, 0.), markers, intr)
+    assert result['savable'] and result['warned'] == ['A3', 'B3'] and result['suspect'] is None
+    assert result['reason'].startswith('저장은 되지만 A3 12.0 cm·B3 5.6 cm') and '3 cm' in result['reason']
+    # 12 cm towards the centre: the others fit within 5 cm without A3, so A3 is named and saving stays allowed.
+    result = core.evaluate(slip(0., .12), markers, intr)
+    assert result['savable'] and result['warned'] == ['A3', 'B3'] and result['suspect'] == 'A3'
+    assert result['reason'].startswith('저장은 되지만') and 'A3 마커가 틀린' in result['reason']
+    json.dumps(result, allow_nan=False)
+
+
+def test_clicked_markers_must_surround_the_waypoint(ost, markers):
+    cfg = assumed()
+    points = clicks(camera.build(cfg)[0], markers)
+    intr = dataclasses.replace(core.read_ost(ost), new_K=camera.intrinsics(cfg))
+    assert core.evaluate(points, markers, intr)['uncovered'] == []
+    assert core.evaluate({k: v for k, v in points.items() if k[0] != 'A'}, markers, intr)['uncovered'] == []   # row B is at 1 m
+    # Left column and row A out of view: exact clicks fit, but the left of the 1 m ring is extrapolated.
+    result = core.evaluate({k: points[k] for k in ('B2', 'B3', 'C2', 'C3', 'D2', 'D3')}, markers, intr)
+    assert result['savable'] and result['uncovered'] == ['near-left', 'far-left'] and result['warned'] == []
+    assert result['reason'].startswith('저장은 되지만') and '왼쪽' in result['reason']
+    # Left, right, near and far each have a marker, but nothing near on the left: a 4 cm slip of C1 put the 1 m ring
+    # 14 cm off while every error stayed under 5 cm.
+    result = core.evaluate({k: points[k] for k in ('B3', 'C1', 'C2', 'D1', 'D2', 'D3')}, markers, intr)
+    assert result['savable'] and result['uncovered'] == ['near-left']
+    result = core.evaluate({k: points[k] for k in ('C1', 'C2', 'C3', 'D1', 'D2', 'D3')}, markers, intr)
+    assert result['savable'] and result['uncovered'] == ['near-left', 'near-right'] and '1 m' in result['reason']
+    result = core.evaluate(points, markers, intr, ahead_m=2.5)   # the course model's waypoint distance
+    assert result['savable'] and result['uncovered'] == ['far-left', 'far-right'] and '2.5 m' in result['reason']
+
+
 @pytest.mark.parametrize('pitch', [0., 10.])
 def test_pose_round_trips_camsim_build(pitch):
     cfg = assumed(pitch=pitch)
@@ -386,10 +441,31 @@ def test_read_bag_frame_returns_middle_message(tmp_path):
         core.read_bag_frame(bag, '/flir_camera/camera_info')
     with pytest.raises(ValueError, match='0개'):
         core.read_bag_frame(bag, '/empty')
-    with pytest.raises(ValueError, match='encoding'):
+    with pytest.raises(ValueError, match='인코딩 mono16'):
         core.read_bag_frame(bag, '/depth')
     with pytest.raises(FileNotFoundError):
         core.read_bag_frame(tmp_path/'nope', '/flir_camera/image_raw')
+
+
+def test_a_damaged_bag_is_an_error_not_a_traceback(tmp_path):
+    rosbag = pytest.importorskip('rosbag2_py')
+    from rclpy.serialization import serialize_message
+    from cv_bridge import CvBridge
+    bag, bridge = tmp_path/'calib', CvBridge()
+    writer = rosbag.SequentialWriter()
+    writer.open(rosbag.StorageOptions(uri=str(bag), storage_id='sqlite3'), rosbag.ConverterOptions('', ''))
+    writer.create_topic(rosbag.TopicMetadata(name='/flir_camera/image_raw', type='sensor_msgs/msg/Image', serialization_format='cdr'))
+    for i in range(3):
+        writer.write('/flir_camera/image_raw', serialize_message(bridge.cv2_to_imgmsg(np.zeros((60, 80, 3), np.uint8), encoding='bgr8')),
+                     10000000000 + i * 100000000)
+    del writer
+    db3 = next(bag.glob('*.db3'))
+    db3.write_bytes(db3.read_bytes()[:db3.stat().st_size // 2])   # recording cut short: power loss or a full disk
+    with pytest.raises(ValueError, match='rosbag을 읽을 수 없습니다.*다시 기록'):
+        core.read_bag_frame(bag, '/flir_camera/image_raw')
+    (bag/'metadata.yaml').write_text('rosbag2_bagfile_information:\n  version: [\n')
+    with pytest.raises(ValueError, match='rosbag을 읽을 수 없습니다.*다시 기록'):
+        core.read_bag_frame(bag, '/flir_camera/image_raw')
 
 
 def test_core_import_needs_no_ros_or_torch():

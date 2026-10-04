@@ -25,6 +25,8 @@ from camreal.preprocessing import CameraPreprocessor
 
 MIN_FIT, MIN_LOO, MIN_SAVE = 4, 5, 6
 WARN_CM, REJECT_CM = 5.0, 20.0
+PASS_CM = 3.0     # spec 3.2 step 2: pilot pass for the A·B rows (near ahead_m)
+SIDE_M = .2       # uncovered(): "left" and "right" of the waypoint start this far from the centre line
 MAX_COND = 1e8   # camera homographies stay near 1e3-1e5; collinear clicks give 1e10 and more
 CLOSE_PX = 5.     # two markers clicked closer than this: one of them is the other's cross
 GREY = (200, 200, 200)
@@ -158,6 +160,8 @@ def load_markers(path):
         x, y = float(value[0]), float(value[1])
         if x <= 0:
             raise ValueError(f'{path}: {name}의 x({x:g} m)는 0보다 커야 합니다 (후륜축보다 앞).')
+        if x > 10 or abs(y) > 5:   # a tape reading in cm or mm: the camera sees markers a few metres away at most
+            raise ValueError(f'{path}: {name}의 좌표 ({x:g}, {y:g})가 너무 큽니다. 단위는 m입니다 (60 cm → 0.60).')
         if (x, y) in owner:
             raise ValueError(f'{path}: {owner[(x, y)]}, {name} 마커의 좌표가 같습니다 ({x:g}, {y:g}).')
         owner[(x, y)], markers[name] = name, (x, y)
@@ -186,28 +190,31 @@ def read_bag_frame(bag_path, image_topic):
     bag = Path(bag_path).expanduser()
     if not (bag/'metadata.yaml').is_file():
         raise FileNotFoundError(f'rosbag이 없습니다: {bag} (metadata.yaml이 있는 ros2 bag record --output 폴더를 지정하세요)')
-    meta = rosbag2_py.Info().read_metadata(str(bag), '')
-    if meta.compression_mode not in ('', 'none'):
-        raise ValueError('압축되지 않은 rosbag2를 사용하세요. 현재 compressed storage는 지원하지 않습니다.')
-    topics = {t.topic_metadata.name: t for t in meta.topics_with_message_count}
-    if image_topic not in topics:
-        raise ValueError(f'{bag}에 {image_topic} 토픽이 없습니다. 기록된 토픽: {", ".join(sorted(topics)) or "없음"}')
-    topic = topics[image_topic]
-    if topic.topic_metadata.type != 'sensor_msgs/msg/Image':
-        raise ValueError(f'{image_topic}: sensor_msgs/msg/Image 토픽이 아닙니다 ({topic.topic_metadata.type}).')
-    if topic.message_count == 0:
-        raise ValueError(f'{bag}의 {image_topic} 메시지가 0개입니다. 카메라를 켠 상태에서 다시 기록하세요.')
-    reader = rosbag2_py.SequentialReader()
-    reader.open(rosbag2_py.StorageOptions(uri=str(bag), storage_id=meta.storage_identifier),
-                rosbag2_py.ConverterOptions('', ''))
-    reader.set_filter(rosbag2_py.StorageFilter(topics=[image_topic]))
-    for _ in range(topic.message_count // 2 + 1):
-        if not reader.has_next():
-            raise ValueError(f'{image_topic} 메시지가 metadata보다 적습니다. bag이 손상되었습니다.')
-        data = reader.read_next()[1]
-    message = deserialize_message(data, Image)
+    try:
+        meta = rosbag2_py.Info().read_metadata(str(bag), '')
+        if meta.compression_mode not in ('', 'none'):
+            raise ValueError('압축되지 않은 rosbag2를 사용하세요. 현재 compressed storage는 지원하지 않습니다.')
+        topics = {t.topic_metadata.name: t for t in meta.topics_with_message_count}
+        if image_topic not in topics:
+            raise ValueError(f'{bag}에 {image_topic} 토픽이 없습니다. 기록된 토픽: {", ".join(sorted(topics)) or "없음"}')
+        topic = topics[image_topic]
+        if topic.topic_metadata.type != 'sensor_msgs/msg/Image':
+            raise ValueError(f'{image_topic}: sensor_msgs/msg/Image 토픽이 아닙니다 ({topic.topic_metadata.type}).')
+        if topic.message_count == 0:
+            raise ValueError(f'{bag}의 {image_topic} 메시지가 0개입니다. 카메라를 켠 상태에서 다시 기록하세요.')
+        reader = rosbag2_py.SequentialReader()
+        reader.open(rosbag2_py.StorageOptions(uri=str(bag), storage_id=meta.storage_identifier),
+                    rosbag2_py.ConverterOptions('', ''))
+        reader.set_filter(rosbag2_py.StorageFilter(topics=[image_topic]))
+        for _ in range(topic.message_count // 2 + 1):
+            if not reader.has_next():
+                raise ValueError(f'{image_topic} 메시지가 metadata보다 적습니다. bag이 손상되었습니다.')
+            data = reader.read_next()[1]
+        message = deserialize_message(data, Image)
+    except RuntimeError as exc:   # rosbag2: a cut-short or broken db3 or metadata.yaml, or a storage plugin not installed
+        raise ValueError(f'{bag}: rosbag을 읽을 수 없습니다 (기록이 중간에 끊겼거나 손상됨: {exc}). 차를 그대로 두고 다시 기록하세요.') from exc
     if message.encoding.lower() not in ENCODINGS:
-        raise ValueError(f'unsupported image encoding: {message.encoding}')
+        raise ValueError(f'{image_topic}: 지원하지 않는 영상 인코딩 {message.encoding}입니다.')
     stamp = message.header.stamp.sec * 1000000000 + message.header.stamp.nanosec
     return CvBridge().imgmsg_to_cv2(message, desired_encoding='bgr8'), stamp
 
@@ -294,15 +301,19 @@ def suspect(points, markers):
     """The clicked marker whose removal lets every other click fit within WARN_CM; None unless exactly one does.
 
     With few clicks one misclick bends every leave-one-out fit, so a good marker can show the largest error.
+    Only a proven culprit is named: up to MIN_LOO clicks every removal leaves MIN_FIT points, which any H fits
+    exactly, and a removal that leaves no H (the rest on one line) cannot be tested, so the one found may be good.
     """
     ids, img, ground = _pairs(points, markers)
+    if len(ids) <= MIN_LOO:
+        return None
     found = []
     for i, k in enumerate(ids):
         rest = np.arange(len(ids)) != i
         try:
             H = _fit(img[rest], ground[rest])
         except ValueError:
-            continue
+            return None
         with np.errstate(divide='ignore', invalid='ignore'):
             if (np.hypot(*(camera.project(H, img[rest]) - ground[rest]).T) <= WARN_CM / 100).all():   # NaN: False
                 found.append(k)
@@ -332,20 +343,32 @@ def estimate_pose(H_i2g, new_K):
                 roll_deg=math.degrees(math.atan2(B[2, 1], B[2, 2])))
 
 
-def evaluate(points, markers, intr):
+def uncovered(ground, ahead_m):
+    """Quarters around the waypoint (ahead_m ahead on the centre line) with no clicked marker: 'near-left' ... 'far-right'.
+
+    Clicks in all four keep the waypoint inside them; otherwise the fit is extrapolated there, which leave-one-out cannot see.
+    """
+    x, y = np.asarray(ground, dtype=float).reshape(-1, 2).T
+    return [f'{a}-{b}' for a, ahead in (('near', x <= ahead_m), ('far', x >= ahead_m))
+            for b, side in (('left', y >= SIDE_M), ('right', y <= -SIDE_M)) if not (ahead & side).any()]
+
+
+def evaluate(points, markers, intr, ahead_m=1.):
     """What the UI shows for the clicks so far; the server recomputes it on save.
 
     savable: MIN_SAVE or more markers, every leave-one-out error <= REJECT_CM and the camera above
     the floor (a mirrored marker frame fits just as well but puts the camera below it).
+    warned (markers over WARN_CM) and uncovered (uncovered() for the course model's ahead_m) stay savable,
+    as spec 4.5 says, but the reason starts with "저장은 되지만" and says what to re-click.
     suspect: the one marker to re-click when a single misclick explains the errors (suspect()), else None.
     """
-    ids, img, _ = _pairs(points, markers)
+    ids, img, ground = _pairs(points, markers)
     if len(ids) and not ((img >= 0) & (img < [intr.width, intr.height])).all():
         raise ValueError(f'영상({intr.width}x{intr.height}) 밖의 픽셀이 있습니다.')
-    n = len(ids)
+    n, gaps = len(ids), uncovered(ground, ahead_m)
     close = ', '.join(f'{a}·{b}' for (a, p), (b, q) in combinations(zip(ids, img.tolist()), 2) if math.dist(p, q) < CLOSE_PX)
     note = f' 경고: 거의 같은 곳({CLOSE_PX:g} px 안)에 찍은 마커 {close}. 둘 중 하나는 다른 마커의 십자입니다.' if close else ''
-    result = dict(n=n, H_i2g=None, errors_cm={}, rms_cm=None, pose=None, suspect=None, savable=False,
+    result = dict(n=n, H_i2g=None, errors_cm={}, rms_cm=None, pose=None, suspect=None, warned=[], uncovered=gaps, savable=False,
                   reason=f'마커를 {MIN_FIT}개 이상 찍으면 계산합니다 (지금 {n}개, 저장은 {MIN_SAVE}개부터).' + note)
     if n < MIN_FIT:
         return result
@@ -357,27 +380,36 @@ def evaluate(points, markers, intr):
     known = [e for e in errors.values() if e is not None]
     rms = round(math.sqrt(sum(e * e for e in known) / n), 2) if len(known) == n else None
     pose = {k: round(v, 4) + 0. for k, v in estimate_pose(H, intr.new_K).items()}   # + 0. turns -0.0 into 0.0
-    far = [k for k, e in errors.items() if e is not None and e > REJECT_CM]
+    warned = [k for k, e in errors.items() if e is not None and e > WARN_CM]
+    far = [k for k in warned if errors[k] > REJECT_CM]
     lost = [k for k, e in errors.items() if e is None]
-    bad = suspect(points, markers) if far else None
-    problems = []
+    bad = suspect(points, markers) if warned else None
+    named = (f'{bad} 마커가 틀린 것으로 보입니다: 이 마커를 빼면 나머지는 모두 {WARN_CM:g} cm 안에 맞습니다(다른 마커의 큰 오차도 '
+             '이 마커 때문). 다시 찍거나 건너뛰고, 다시 찍어도 그대로면 markers.yaml의 줄자 값을 확인하세요.') if bad else ''
+    over = '·'.join(f'{k} {errors[k]:.1f} cm' for k in warned if k not in far)
+    problems, warnings = [], []
     if n < MIN_SAVE:
         problems.append(f'저장하려면 마커를 {MIN_SAVE}개 이상 찍으세요 (지금 {n}개).')
-    if bad:
-        problems.append(f'{bad} 마커가 틀린 것으로 보입니다: 이 마커를 빼면 나머지는 모두 {WARN_CM:g} cm 안에 맞습니다(다른 마커의 큰 오차도 '
-                        '이 마커 때문). 다시 찍거나 건너뛰고, 다시 찍어도 그대로면 markers.yaml의 줄자 값을 확인하세요.')
-    elif far:
-        problems.append(f'오차가 {REJECT_CM:g} cm를 넘는 마커: {", ".join(far)}. 이 중 하나 이상이 잘못 찍혔습니다(한 점이 틀리면 '
+    if far:
+        problems.append(named or f'오차가 {REJECT_CM:g} cm를 넘는 마커: {", ".join(far)}. 이 중 하나 이상이 잘못 찍혔습니다(한 점이 틀리면 '
                         '다른 마커의 오차도 함께 커집니다). 다시 찍거나 건너뛰세요.')
+        if over and not bad:   # with a suspect the other errors are its doing
+            warnings.append(f'경고(오차 {WARN_CM:g} cm 초과): {over}')
+    elif warned:
+        warnings.append(f'{over}가 {WARN_CM:g} cm를 넘습니다(점검 기준: A·B줄 {PASS_CM:g} cm 이하). {named or "다시 찍어 보세요."}')
     if lost:
         problems.append(f'검증할 수 없는 마커: {", ".join(lost)} (빼면 나머지가 한 줄). 다른 줄의 마커를 더 찍으세요.')
     if pose['height_m'] <= 0:
         problems.append(f'추정 카메라 높이가 {pose["height_m"]:.2f} m(바닥 아래)입니다. 마커 좌표의 y 부호(왼쪽 +)와 [x, y] 순서를 확인하세요.')
-    warn = ', '.join(f'{k} {e:.1f} cm' for k, e in errors.items() if e is not None and WARN_CM < e <= REJECT_CM)
-    reason = ' '.join(problems) or f'저장 가능: 마커 {n}개, RMS {rms:.1f} cm.'
-    if warn and not bad:   # with a suspect the other errors are its doing
-        reason += f' 경고(오차 {WARN_CM:g} cm 초과): {warn}'
-    return dict(result, H_i2g=H.tolist(), errors_cm=errors, rms_cm=rms, pose=pose, suspect=bad, savable=not problems,
+    if gaps and not problems:
+        names = dict(near=f'x ≤ {ahead_m:g} m', far=f'x ≥ {ahead_m:g} m', left='왼쪽', right='오른쪽')
+        where = '·'.join(' '.join(names[w] for w in g.split('-')) for g in gaps)
+        warnings.append(f'{where}에 찍은 마커가 없어 {ahead_m:g} m 앞 waypoint 자리를 마커가 둘러싸지 못합니다(왼쪽 y ≥ {SIDE_M:g} m, '
+                        f'오른쪽 y ≤ -{SIDE_M:g} m; 그쪽 오차는 확인되지 않음). 그쪽 마커를 찍고, 영상에 안 보이면 보이는 곳으로 옮겨 '
+                        '다시 재고 기록하세요.')
+    reason = (' '.join(problems + warnings) if problems else '저장은 되지만 ' + ' '.join(warnings) if warnings else
+              f'저장 가능: 마커 {n}개, RMS {rms:.1f} cm.')
+    return dict(result, H_i2g=H.tolist(), errors_cm=errors, rms_cm=rms, pose=pose, suspect=bad, warned=warned, savable=not problems,
                 reason=reason + note)
 
 
