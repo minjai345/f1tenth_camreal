@@ -3,17 +3,20 @@
 Clicks are pixels of the full-resolution undistorted image made with CameraPreprocessor's maps,
 so H_i2g lands in the homography_space the car uses. ROS is imported only by read_bag_frame.
 """
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 from itertools import combinations
 import math
+import os
 from pathlib import Path
 import re
+import shutil
 import cv2
 import numpy as np
 import yaml
 from camsim import camera
-from camsim.handoff import sha256_file
 from camsim.render import bev_pixels
 from camreal.calibration import WEEK1_OST
 from camreal.checkpoint import training_mask
@@ -23,7 +26,11 @@ from camreal.preprocessing import CameraPreprocessor
 MIN_FIT, MIN_LOO, MIN_SAVE = 4, 5, 6
 WARN_CM, REJECT_CM = 5.0, 20.0
 MAX_COND = 1e8   # camera homographies stay near 1e3-1e5; collinear clicks give 1e10 and more
+CLOSE_PX = 5.     # two markers clicked closer than this: one of them is the other's cross
 GREY = (200, 200, 200)
+CONFIG = Path(__file__).resolve().parents[1]/'config'
+REFERENCE = CONFIG/'ost_reference_1920x1200.yaml'   # spec section 7: the TA adds it
+REFERENCE_OPTION = '--ost camreal/config/ost_reference_1920x1200.yaml'
 HEADER = '# camreal 지면 캘리브레이션: python3 -m camreal calibrate가 만든 파일. 고칠 때는 다시 실행하세요.\n'
 
 
@@ -38,9 +45,35 @@ class Intrinsics:
     sha256: str
 
 
+class _Twice(ValueError):
+    pass
+
+
+class _Loader(yaml.SafeLoader):
+    """yaml.safe_load that refuses a key written twice in one mapping (plain YAML keeps the last one silently)."""
+
+    def construct_mapping(self, node, deep=False):
+        lines = {}
+        for key_node, _ in node.value:
+            if key_node.tag == 'tag:yaml.org,2002:merge':
+                continue
+            key, line = self.construct_object(key_node), key_node.start_mark.line + 1
+            try:
+                if key in lines:
+                    raise _Twice(f'{key}이(가) {lines[key]}번째 줄과 {line}번째 줄에 두 번 적혀 있습니다. 하나만 남기세요.')
+                lines[key] = line
+            except TypeError:   # unhashable key: SafeLoader reports it
+                pass
+        return super().construct_mapping(node, deep)
+
+
 def _read_yaml(path):
+    """(data, sha256 of the bytes parsed); YAML mistakes become ValueErrors naming the lines."""
+    raw = path.read_bytes()
     try:
-        return yaml.safe_load(path.read_text())
+        return yaml.load(raw, _Loader), hashlib.sha256(raw).hexdigest()
+    except _Twice as exc:
+        raise ValueError(f'{path}: {exc}') from None
     except yaml.YAMLError as exc:
         lines = sorted({m.line + 1 for m in (getattr(exc, 'context_mark', None), getattr(exc, 'problem_mark', None)) if m})
         where = f' ({"~".join(map(str, lines))}번째 줄)' if lines else ''
@@ -68,7 +101,7 @@ def read_ost(path):
     new_K = P[:, :3], the undistorted view week-1 image_proc showed; K when P is missing or unusable.
     """
     path = Path(path).expanduser().resolve()
-    data = _read_yaml(path)
+    data, sha256 = _read_yaml(path)
     keys = ('image_width', 'image_height', 'camera_matrix', 'distortion_model', 'distortion_coefficients')
     missing = [k for k in keys if not isinstance(data, dict) or k not in data]
     if missing:
@@ -90,7 +123,7 @@ def read_ost(path):
             new_K = P if _pinhole(P) else K
         except ValueError:
             pass
-    return Intrinsics(width, height, K, D, new_K.copy(), str(path), sha256_file(path))
+    return Intrinsics(width, height, K, D, new_K.copy(), str(path), sha256)
 
 
 def ost_kind(path):
@@ -98,13 +131,20 @@ def ost_kind(path):
     path = Path(path).expanduser().resolve()
     if path == Path(WEEK1_OST).expanduser().resolve():
         return '1주차 학생 파일'
-    return '기준 파일' if path.parent == Path(__file__).resolve().parents[1]/'config' else '--ost로 지정한 파일'
+    return '기준 파일' if path.parent == CONFIG else '--ost로 지정한 파일'
+
+
+def reference_option(current=None):
+    """REFERENCE_OPTION to suggest, or None while the reference file is missing or is already the one in use."""
+    if not REFERENCE.is_file() or (current is not None and Path(current).expanduser().resolve() == REFERENCE.resolve()):
+        return None
+    return REFERENCE_OPTION
 
 
 def load_markers(path):
-    """markers.yaml {markers: {id: [x, y]}} -> {id: (x, y)} in rear-axle metres, file order."""
+    """markers.yaml {markers: {id: [x, y]}} -> ({id: (x, y)} rear-axle metres in file order, sha256 of the bytes parsed)."""
     path = Path(path).expanduser()
-    data = _read_yaml(path)
+    data, sha256 = _read_yaml(path)
     if not isinstance(data, dict) or not isinstance(data.get('markers'), dict):
         raise ValueError(f'{path}: markers: 아래에 id: [x, y]를 적으세요 (camreal/config/markers.yaml 참고).')
     markers, owner = {}, {}
@@ -119,11 +159,14 @@ def load_markers(path):
         if x <= 0:
             raise ValueError(f'{path}: {name}의 x({x:g} m)는 0보다 커야 합니다 (후륜축보다 앞).')
         if (x, y) in owner:
-            raise ValueError(f'{path}: {owner[(x, y)]}와 {name}의 좌표가 같습니다 ({x:g}, {y:g}).')
+            raise ValueError(f'{path}: {owner[(x, y)]}, {name} 마커의 좌표가 같습니다 ({x:g}, {y:g}).')
         owner[(x, y)], markers[name] = name, (x, y)
     if len(markers) < MIN_SAVE:
         raise ValueError(f'{path}: 마커가 {len(markers)}개입니다. {MIN_SAVE}개 이상 적으세요.')
-    return markers
+    if not _spread(np.array(list(markers.values()))):
+        raise ValueError(f'{path}: 마커가 한 줄에 몰려 있습니다. 어느 셋도 한 줄에 있지 않은 마커 4개가 있어야 '
+                         'H를 계산할 수 있으니 두 줄 이상에 나눠 붙이세요.')
+    return markers, sha256
 
 
 def read_image(path):
@@ -171,12 +214,15 @@ def read_bag_frame(bag_path, image_topic):
 
 def check_resolution(frame, intr):
     h, w = frame.shape[:2]
-    if (w, h) != (intr.width, intr.height):
-        raise ValueError(
-            f'영상 해상도 {w}x{h}가 ost.yaml({intr.path})의 {intr.width}x{intr.height}와 다릅니다. 다음 중 하나로 맞추세요: '
-            f'1) 카메라 해상도를 캘리브레이션 때와 같은 {intr.width}x{intr.height}로 설정 '
-            f'2) 1주차 방식(cameracalibrator)으로 {w}x{h}에서 다시 캘리브레이션 '
-            '3) --ost로 기준 파일 지정 (--ost camreal/config/ost_reference_1920x1200.yaml)')
+    if (w, h) == (intr.width, intr.height):
+        return
+    fixes = [f'카메라 해상도를 캘리브레이션 때 해상도({intr.width}x{intr.height})로 설정',
+             f'1주차 방식(cameracalibrator)으로 {w}x{h}에서 다시 캘리브레이션']
+    option = reference_option(intr.path)
+    if option:
+        fixes.append(f'{option}로 기준 파일 지정' if (w, h) == (1920, 1200) else f'카메라 해상도를 1920x1200으로 바꾸고 {option}로 기준 파일 지정')
+    raise ValueError(f'영상 해상도({w}x{h})와 ost.yaml({intr.path})의 해상도({intr.width}x{intr.height})가 다릅니다. '
+                     '다음 중 하나로 맞추세요: ' + ' '.join(f'{i}) {fix}' for i, fix in enumerate(fixes, 1)))
 
 
 def undistort(frame, intr):
@@ -244,6 +290,25 @@ def loo_errors(points, markers):
     return errors
 
 
+def suspect(points, markers):
+    """The clicked marker whose removal lets every other click fit within WARN_CM; None unless exactly one does.
+
+    With few clicks one misclick bends every leave-one-out fit, so a good marker can show the largest error.
+    """
+    ids, img, ground = _pairs(points, markers)
+    found = []
+    for i, k in enumerate(ids):
+        rest = np.arange(len(ids)) != i
+        try:
+            H = _fit(img[rest], ground[rest])
+        except ValueError:
+            continue
+        with np.errstate(divide='ignore', invalid='ignore'):
+            if (np.hypot(*(camera.project(H, img[rest]) - ground[rest]).T) <= WARN_CM / 100).all():   # NaN: False
+                found.append(k)
+    return found[0] if len(found) == 1 else None
+
+
 def estimate_pose(H_i2g, new_K):
     """Camera pose from inv(H_i2g) = s * new_K [r1 r2 t] in camsim.camera conventions.
 
@@ -272,39 +337,53 @@ def evaluate(points, markers, intr):
 
     savable: MIN_SAVE or more markers, every leave-one-out error <= REJECT_CM and the camera above
     the floor (a mirrored marker frame fits just as well but puts the camera below it).
+    suspect: the one marker to re-click when a single misclick explains the errors (suspect()), else None.
     """
     ids, img, _ = _pairs(points, markers)
     if len(ids) and not ((img >= 0) & (img < [intr.width, intr.height])).all():
         raise ValueError(f'영상({intr.width}x{intr.height}) 밖의 픽셀이 있습니다.')
     n = len(ids)
-    result = dict(n=n, H_i2g=None, errors_cm={}, rms_cm=None, pose=None, savable=False,
-                  reason=f'마커를 {MIN_FIT}개 이상 찍으면 계산합니다 (지금 {n}개, 저장은 {MIN_SAVE}개부터).')
+    close = ', '.join(f'{a}·{b}' for (a, p), (b, q) in combinations(zip(ids, img.tolist()), 2) if math.dist(p, q) < CLOSE_PX)
+    note = f' 경고: 거의 같은 곳({CLOSE_PX:g} px 안)에 찍은 마커 {close}. 둘 중 하나는 다른 마커의 십자입니다.' if close else ''
+    result = dict(n=n, H_i2g=None, errors_cm={}, rms_cm=None, pose=None, suspect=None, savable=False,
+                  reason=f'마커를 {MIN_FIT}개 이상 찍으면 계산합니다 (지금 {n}개, 저장은 {MIN_SAVE}개부터).' + note)
     if n < MIN_FIT:
         return result
     try:
         H = fit_homography(points, markers)
     except ValueError as exc:
-        return dict(result, reason=str(exc))
+        return dict(result, reason=str(exc) + note)
     errors = {k: round(e * 100, 2) if math.isfinite(e) else None for k, e in loo_errors(points, markers).items()}
     known = [e for e in errors.values() if e is not None]
     rms = round(math.sqrt(sum(e * e for e in known) / n), 2) if len(known) == n else None
     pose = {k: round(v, 4) + 0. for k, v in estimate_pose(H, intr.new_K).items()}   # + 0. turns -0.0 into 0.0
     far = [k for k, e in errors.items() if e is not None and e > REJECT_CM]
     lost = [k for k, e in errors.items() if e is None]
+    bad = suspect(points, markers) if far else None
     problems = []
     if n < MIN_SAVE:
         problems.append(f'저장하려면 마커를 {MIN_SAVE}개 이상 찍으세요 (지금 {n}개).')
-    if far:
-        problems.append(f'오차가 {REJECT_CM:g} cm를 넘는 마커: {", ".join(far)}. 다른 마커를 찍은 것으로 보입니다. 다시 찍거나 건너뛰세요.')
+    if bad:
+        problems.append(f'{bad} 마커가 틀린 것으로 보입니다: 이 마커를 빼면 나머지는 모두 {WARN_CM:g} cm 안에 맞습니다(다른 마커의 큰 오차도 '
+                        '이 마커 때문). 다시 찍거나 건너뛰고, 다시 찍어도 그대로면 markers.yaml의 줄자 값을 확인하세요.')
+    elif far:
+        problems.append(f'오차가 {REJECT_CM:g} cm를 넘는 마커: {", ".join(far)}. 이 중 하나 이상이 잘못 찍혔습니다(한 점이 틀리면 '
+                        '다른 마커의 오차도 함께 커집니다). 다시 찍거나 건너뛰세요.')
     if lost:
         problems.append(f'검증할 수 없는 마커: {", ".join(lost)} (빼면 나머지가 한 줄). 다른 줄의 마커를 더 찍으세요.')
     if pose['height_m'] <= 0:
         problems.append(f'추정 카메라 높이가 {pose["height_m"]:.2f} m(바닥 아래)입니다. 마커 좌표의 y 부호(왼쪽 +)와 [x, y] 순서를 확인하세요.')
     warn = ', '.join(f'{k} {e:.1f} cm' for k, e in errors.items() if e is not None and WARN_CM < e <= REJECT_CM)
     reason = ' '.join(problems) or f'저장 가능: 마커 {n}개, RMS {rms:.1f} cm.'
-    if warn:
+    if warn and not bad:   # with a suspect the other errors are its doing
         reason += f' 경고(오차 {WARN_CM:g} cm 초과): {warn}'
-    return dict(result, H_i2g=H.tolist(), errors_cm=errors, rms_cm=rms, pose=pose, savable=not problems, reason=reason)
+    return dict(result, H_i2g=H.tolist(), errors_cm=errors, rms_cm=rms, pose=pose, suspect=bad, savable=not problems,
+                reason=reason + note)
+
+
+def hfov_deg(intr):
+    """Horizontal FOV of the undistorted image (new_K): camsim's camera.hfov_deg for retraining on this camera."""
+    return round(math.degrees(2 * math.atan(intr.width / 2 / intr.new_K[0, 0])), 4)   # 4 decimals like the pose
 
 
 def calibration_dict(intr, H_i2g, status='measured'):
@@ -324,50 +403,73 @@ def bev_preview(raw_frame, calibration, cfg, markers, points):
     return out
 
 
+def check_markers(source):
+    """Refuse once the markers file no longer holds the bytes load_markers parsed: this session never saw the edit."""
+    try:
+        same = hashlib.sha256(Path(source['markers']).read_bytes()).hexdigest() == source['markers_sha256']
+    except OSError:
+        same = False
+    if not same:
+        raise ValueError(f'{source["markers"]}이(가) calibrate를 시작한 뒤에 바뀌어 이 화면에는 반영되지 않았습니다. '
+                         'calibrate를 다시 실행하세요 (같은 영상이면 찍은 점은 브라우저가 다시 불러옵니다).')
+
+
 def build_calibration(intr, result, points, markers, source):
     """calibration_dict + provenance + per-marker check + pose, YAML-safe. result = evaluate(points, markers, intr).
 
-    source: frame (bag session or image path), frame_stamp_ns (None for an image), markers (markers.yaml path).
+    source: frame (bag session or image path), frame_stamp_ns (None for an image), markers (markers.yaml path) and
+    markers_sha256 (from load_markers; the file must still hold those bytes).
     """
     if not result['savable']:
         raise ValueError(f'저장할 수 없습니다: {result["reason"]}')
     if set(result['errors_cm']) != set(points):
         raise ValueError('result가 이 points로 계산한 것이 아닙니다. evaluate를 다시 실행하세요.')
+    check_markers(source)
     stamp = source.get('frame_stamp_ns')
     data = calibration_dict(intr, result['H_i2g'])
     data['source'] = dict(ost=intr.path, ost_sha256=intr.sha256, frame=str(source['frame']),
                           frame_stamp_ns=None if stamp is None else int(stamp),
-                          markers=str(Path(source['markers']).resolve()), markers_sha256=sha256_file(source['markers']),
+                          markers=str(Path(source['markers']).resolve()), markers_sha256=source['markers_sha256'],
                           created_utc=datetime.now(timezone.utc).isoformat(timespec='seconds'))
     data['markers'] = [dict(id=k, ground_m=[float(c) for c in markers[k]], pixel=[round(float(c), 2) for c in points[k]],
                             error_cm=float(result['errors_cm'][k])) for k in markers if k in points]
-    data['camera_pose_estimate'] = {k: float(v) for k, v in result['pose'].items()}
+    data['camera_pose_estimate'] = dict({k: float(v) for k, v in result['pose'].items()}, hfov_deg=hfov_deg(intr))
     return data
 
 
 def save_calibration(data, out_path, preview_bgr):
-    """Write YAML atomically (an old file goes to <parent>/old/<stem>-YYYYmmdd-HHMMSS<suffix>) and <stem>_bev.png."""
+    """Write YAML and <stem>_bev.png; an old YAML is first copied to <parent>/old/<stem>-YYYYmmdd-HHMMSS<suffix>.
+
+    Both are written to temporaries first and the YAML is replaced last: on any error the car keeps the
+    old calibration and no temporary is left behind.
+    """
     out = Path(out_path)
     text = HEADER + yaml.safe_dump(data, sort_keys=False, allow_unicode=True, default_flow_style=None)
     ok, png = cv2.imencode('.png', preview_bgr)
     if not ok:
         raise ValueError('BEV 미리보기를 PNG로 만들 수 없습니다.')
-    out.parent.mkdir(parents=True, exist_ok=True)
-    temporary = out.with_name(out.name + '.tmp')
-    temporary.write_text(text, encoding='utf-8')
-    backup = None
-    if out.exists():
-        old = out.parent/'old'
-        old.mkdir(exist_ok=True)
-        stamp, i = datetime.now().strftime('%Y%m%d-%H%M%S'), 0
-        backup = old/f'{out.stem}-{stamp}{out.suffix}'
-        while backup.exists():
-            i += 1
-            backup = old/f'{out.stem}-{stamp}-{i}{out.suffix}'
-        out.replace(backup)
-    temporary.replace(out)
     preview = out.with_name(out.stem + '_bev.png')
-    temporary = preview.with_name(preview.name + '.tmp')
-    temporary.write_bytes(png.tobytes())
-    temporary.replace(preview)
+    temporary = {out: out.with_name(out.name + '.tmp'), preview: preview.with_name(preview.name + '.tmp')}
+    backup = None
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        temporary[out].write_text(text, encoding='utf-8')
+        temporary[preview].write_bytes(png.tobytes())
+        if out.exists():
+            old = out.parent/'old'
+            old.mkdir(exist_ok=True)
+            stamp, i = datetime.now().strftime('%Y%m%d-%H%M%S'), 0
+            backup = old/f'{out.stem}-{stamp}{out.suffix}'
+            while backup.exists():
+                i += 1
+                backup = old/f'{out.stem}-{stamp}-{i}{out.suffix}'
+            shutil.copy2(out, backup)
+        os.replace(temporary[preview], preview)
+        os.replace(temporary[out], out)   # last: until here the car reads the old file
+    except OSError as exc:
+        raise OSError(f'저장하지 못했습니다: {exc.filename2 or exc.filename or out} ({exc.strerror or exc})') from exc
+    finally:
+        for path in temporary.values():
+            with contextlib.suppress(OSError):
+                path.unlink()
     return out, backup

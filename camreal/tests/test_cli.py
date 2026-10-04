@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 import subprocess
 import sys
@@ -12,6 +13,18 @@ def test_help_does_not_import_ros_or_torch():
         'for argv in (["--help"],["calibrate","--help"]):\n'
         '    try: main(argv)\n    except SystemExit as e: assert e.code == 0\n'
         'assert "torch" not in sys.modules; assert "rclpy" not in sys.modules'],check=True)
+
+
+def test_ros_package_installs_every_camreal_package():
+    # colcon installs camreal from camsim_driver/setup.py: python3 -m camreal has to work there outside the repo too.
+    setup=next(n for n in ast.walk(ast.parse(Path('camreal/ros2/camsim_driver/setup.py').read_text()))
+               if isinstance(n,ast.Call) and getattr(n.func,'id',None)=='setup')
+    args={k.arg:ast.literal_eval(k.value) for k in setup.keywords if k.arg in ('packages','package_data')}
+    for init in Path('camreal').rglob('__init__.py'):
+        if 'tests' in init.parts or 'ros2' in init.parts:continue
+        package='.'.join(init.parent.parts)
+        assert package in args['packages'],package
+        if (init.parent/'web').is_dir():assert {'web/*.html','web/*.js'}<=set(args['package_data'].get(package,[])),package
 
 
 @pytest.mark.parametrize('argv',[[],['calib','--image','frame.png']])

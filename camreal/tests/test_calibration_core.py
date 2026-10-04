@@ -2,6 +2,8 @@ import dataclasses
 from datetime import datetime
 import hashlib
 import json
+import math
+import shutil
 import subprocess
 import sys
 import cv2
@@ -88,13 +90,26 @@ GOOD = {'M0': [.5, .4], 'M1': [.5, 0.], 'M2': [.5, -.4], 'M3': [.8, .4], 'M4': [
     (lambda m: m.update(M0='1, 2'), 'M0'),
     (lambda m: m.update(M0=[0., .1]), 'M0'),
     (lambda m: m.update(M0=list(m['M4'])), 'M4'),
+    (lambda m: m.update({k: [.5 + .1 * i, 0.] for i, k in enumerate(m)}), '한 줄'),   # no H from any clicks
+    (lambda m: m.update({k: [.5 + .1 * i, 0.] for i, k in enumerate(list(m)[:5])}), '한 줄'),
 ])
 def test_load_markers_validation(tmp_path, edit, match):
     m = {k: list(v) for k, v in GOOD.items()}
-    assert core.load_markers(write(tmp_path, yaml.safe_dump({'markers': m}), 'good.yaml'))['M4'] == (.8, 0.)
+    assert core.load_markers(write(tmp_path, yaml.safe_dump({'markers': m}), 'good.yaml'))[0]['M4'] == (.8, 0.)
     edit(m)
     with pytest.raises(ValueError, match=match):
         core.load_markers(write(tmp_path, yaml.safe_dump({'markers': m}), 'markers.yaml'))
+
+
+def test_load_markers_refuses_a_key_written_twice(tmp_path):
+    text = TEMPLATE.read_text()
+    path = write(tmp_path, text, 'markers.yaml')
+    markers, sha256 = core.load_markers(path)
+    assert markers['B2'] == (1., 0.) and sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    line = text.splitlines().index('  B2: [1.00, 0.00]') + 1
+    path.write_text(text.replace('  B3:', '  B2: [1.5, 0.0]\n  B3:'))   # a pasted line; plain YAML keeps the last B2
+    with pytest.raises(ValueError, match=f'B2.*{line}.*{line + 1}'):
+        core.load_markers(path)
 
 
 def test_yaml_syntax_errors_are_value_errors(tmp_path):
@@ -119,13 +134,24 @@ def test_ost_kind_names_the_week1_file_and_the_reference(tmp_path, monkeypatch):
     assert core.ost_kind(tmp_path/'ost.yaml') == '--ost로 지정한 파일'
 
 
-def test_resolution_mismatch_names_both_sizes_and_remedies(ost):
+def test_resolution_mismatch_names_both_sizes_and_remedies(ost, tmp_path, monkeypatch):
     intr = core.read_ost(ost)
     frame = np.zeros((1080, 1440, 3), np.uint8)
+    monkeypatch.setattr(core, 'REFERENCE', tmp_path/'missing.yaml')   # section 7 not done: no reference file to offer
     with pytest.raises(ValueError) as error:
         core.check_resolution(frame, intr)
-    for text in ('1440x1080', '1480x1080', '카메라 해상도', 'cameracalibrator', '--ost'):
+    for text in ('1440x1080', '1480x1080', '카메라 해상도', 'cameracalibrator'):
         assert text in str(error.value)
+    assert '3)' not in str(error.value) and '--ost' not in str(error.value)
+    reference = write(tmp_path, OST.replace('1480', '1920').replace('1080', '1200'), 'ost_reference_1920x1200.yaml')
+    monkeypatch.setattr(core, 'REFERENCE', reference)
+    with pytest.raises(ValueError, match=r'3\) 카메라 해상도를 1920x1200으로 바꾸고 --ost camreal/config/ost_reference_1920x1200\.yaml'):
+        core.check_resolution(frame, intr)
+    with pytest.raises(ValueError, match=r'3\) --ost camreal/config/ost_reference_1920x1200\.yaml'):
+        core.check_resolution(np.zeros((1200, 1920, 3), np.uint8), intr)
+    with pytest.raises(ValueError) as error:   # the reference already in use: remedy 1 is all it can offer
+        core.check_resolution(frame, core.read_ost(reference))
+    assert '1920x1200' in str(error.value) and '3)' not in str(error.value)
     with pytest.raises(ValueError, match='1440x1080'):
         core.undistort(frame, intr)
     core.check_resolution(np.zeros((1080, 1480, 3), np.uint8), intr)
@@ -198,6 +224,25 @@ def test_fit_needs_enough_valid_points(ost, markers):
         core.evaluate(dict(five, C2=[-5., 10.]), markers, intr)
 
 
+def test_one_misclick_is_named_even_when_it_bends_every_other_fit(ost, markers):
+    cfg = assumed(pitch=12.)
+    points = clicks(camera.build(cfg)[0], markers)
+    intr = dataclasses.replace(core.read_ost(ost), new_K=camera.intrinsics(cfg))
+    six = {k: points[k] for k in ('A1', 'A3', 'B2', 'C1', 'C3', 'D2')}
+    result = core.evaluate(dict(six, A3=points['B2']), markers, intr)   # A3 clicked on B2's cross
+    errors = result['errors_cm']
+    assert max(errors, key=errors.get) != 'A3' and errors['A1'] > core.REJECT_CM   # leave-one-out alone blames A1
+    assert result['suspect'] == 'A3' and not result['savable'] and 'A3 마커' in result['reason'] and 'A1' not in result['reason']
+    assert 'A3·B2' in result['reason']   # one cross clicked for two markers
+    json.dumps(result, allow_nan=False)
+    result = core.evaluate(dict(points, C3=points['D3']), markers, intr)   # 12 clicks: the good D3 is flagged too
+    assert result['errors_cm']['D3'] > core.REJECT_CM and result['suspect'] == 'C3' and 'D3 마커' not in result['reason']
+    result = core.evaluate(dict(points, A1=points['A2'], D3=points['D2']), markers, intr)   # two misclicks: no single culprit
+    assert result['suspect'] is None and not result['savable'] and '하나 이상' in result['reason']
+    assert 'A1·A2' in result['reason'] and 'D2·D3' in result['reason']
+    assert core.evaluate(points, markers, intr)['suspect'] is None
+
+
 @pytest.mark.parametrize('pitch', [0., 10.])
 def test_pose_round_trips_camsim_build(pitch):
     cfg = assumed(pitch=pitch)
@@ -256,13 +301,20 @@ def test_saved_calibration_drives_camera_preprocessor(ost, markers, tmp_path, mo
     for name, color in (('B2', (0, 200, 0)), ('A3', (200, 200, 200))):   # clicked green, skipped grey
         u, v = np.rint(bev_pixels(np.array(markers[name]), bev_cfg)).astype(int)
         assert tuple(int(c) for c in preview[v, u]) == color
-    data = core.build_calibration(intr, result, points, markers,
-                                  dict(frame='calib', frame_stamp_ns=10100000000, markers=TEMPLATE))
+    path = tmp_path/'markers.yaml'
+    shutil.copy(TEMPLATE, path)
+    source = dict(frame='calib', frame_stamp_ns=10100000000, markers=str(path), markers_sha256=core.load_markers(path)[1])
+    data = core.build_calibration(intr, result, points, markers, source)
     assert yaml.safe_load(yaml.safe_dump(data)) == data
     assert '-0.0' not in [str(v) for v in data['camera_pose_estimate'].values()]   # no "y_m: -0.0" in the file
     assert data['source']['ost_sha256'] == intr.sha256 and data['source']['markers_sha256'] == hashlib.sha256(TEMPLATE.read_bytes()).hexdigest()
     assert [m['id'] for m in data['markers']] == list(points) and data['markers'][0]['ground_m'] == [.6, .4]
-    assert data['camera_pose_estimate'] == pytest.approx(dict(x_m=.1, y_m=0., height_m=.2, pitch_deg=10., yaw_deg=0., roll_deg=0.), abs=1e-3)
+    # hfov_deg: the FOV camsim needs, with the height and pitch, to retrain for this camera (spec 3.3).
+    assert data['camera_pose_estimate'] == pytest.approx(dict(x_m=.1, y_m=0., height_m=.2, pitch_deg=10., yaw_deg=0., roll_deg=0.,
+                                                              hfov_deg=math.degrees(2 * math.atan(740 / 784.36676))), abs=1e-3)
+    path.write_text(TEMPLATE.read_text().replace('B2: [1.00, 0.00]', 'B2: [1.02, 0.01]'))   # re-measured after the start
+    with pytest.raises(ValueError, match='다시 실행'):
+        core.build_calibration(intr, result, points, markers, source)
 
     class Clock(datetime):
         @classmethod
@@ -286,7 +338,26 @@ def test_saved_calibration_drives_camera_preprocessor(ost, markers, tmp_path, mo
     saved, backup = core.save_calibration(data, out, preview)
     assert backup.name == 'car-20261008-093000-1.yaml' and len(list(backup.parent.iterdir())) == 2
     with pytest.raises(ValueError):
-        core.build_calibration(intr, dict(result, savable=False), points, markers, dict(frame='x', frame_stamp_ns=None, markers=TEMPLATE))
+        core.build_calibration(intr, dict(result, savable=False), points, markers, dict(source, frame='x', frame_stamp_ns=None))
+
+
+def test_a_failed_save_keeps_the_old_calibration(tmp_path):
+    out, preview = tmp_path/'calibration'/'car.yaml', np.zeros((4, 4, 3), np.uint8)
+    core.save_calibration({'H_i2g': 1}, out, preview)
+    first = out.read_text()
+    bev = out.with_name('car_bev.png')
+    bev.unlink()
+    bev.mkdir()   # the preview cannot be written (a folder here; a full disk on the car)
+    with pytest.raises(OSError, match='저장하지 못했습니다'):
+        core.save_calibration({'H_i2g': 2}, out, preview)
+    assert out.read_text() == first and sorted(p.name for p in out.parent.iterdir()) == ['car.yaml', 'car_bev.png', 'old']
+    assert len(list((out.parent/'old').iterdir())) <= 1   # at most a copy; car.yaml itself never left
+    bev.rmdir()
+    shutil.rmtree(out.parent/'old')
+    (out.parent/'old').write_text('')   # no backup folder possible
+    with pytest.raises(OSError, match='저장하지 못했습니다'):
+        core.save_calibration({'H_i2g': 3}, out, preview)
+    assert out.read_text() == first and sorted(p.name for p in out.parent.iterdir()) == ['car.yaml', 'old']
 
 
 def test_read_bag_frame_returns_middle_message(tmp_path):

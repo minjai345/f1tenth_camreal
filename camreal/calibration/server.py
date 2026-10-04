@@ -3,12 +3,14 @@
 The page sends clicks only; every number it shows and everything /api/save writes is computed here.
 """
 import base64
-from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from dataclasses import asdict, dataclass
+import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-import math
 from pathlib import Path
 import secrets
+import sys
+import threading
 from urllib.parse import urlparse
 import cv2
 import numpy as np
@@ -25,7 +27,16 @@ class CalibrationSession:
     markers: dict             # core.load_markers: {id: (x, y)} rear-axle metres
     cfg: object               # camsim Config of the course model: BEV size, training mask, ahead_m
     out_path: Path            # course calibration file (data/calibration/car.yaml)
-    source: dict              # core.build_calibration source: frame, frame_stamp_ns, markers
+    source: dict              # core.build_calibration source: frame, frame_stamp_ns, markers, markers_sha256
+
+
+class Server(ThreadingHTTPServer):
+    """A daemon thread per request: an idle socket a browser preconnected cannot stall the page's next request."""
+    block_on_close = False   # nor Ctrl+C
+
+    def handle_error(self, request, client_address):
+        if not isinstance(sys.exc_info()[1], ConnectionError):   # a fetch the browser cancelled is not an error
+            super().handle_error(request, client_address)
 
 
 def png(image):
@@ -67,11 +78,11 @@ def fit(session, points):
 
 
 def make_server(session, port=0):
-    """HTTPServer on 127.0.0.1 for one session; POSTs need the per-run token /api/session hands to the page."""
-    token, image, intr = secrets.token_urlsafe(32), png(session.undistorted), session.intr
+    """Server on 127.0.0.1 for one session; POSTs need the per-run token /api/session hands to the page."""
+    token, image, intr, saving = secrets.token_urlsafe(32), png(session.undistorted), session.intr, threading.Lock()
     info = dict(width=intr.width, height=intr.height, markers=[dict(id=k, x=x, y=y) for k, (x, y) in session.markers.items()],
                 ost=intr.path, ost_kind=core.ost_kind(intr.path), frame=str(session.source['frame']), out=str(session.out_path),
-                hfov_deg=round(math.degrees(2 * math.atan(intr.width / 2 / intr.new_K[0, 0])), 2),
+                image_sha256=hashlib.sha256(image).hexdigest(), hfov_deg=core.hfov_deg(intr), bev=asdict(session.cfg.bev),
                 warn_cm=core.WARN_CM, reject_cm=core.REJECT_CM, min_fit=core.MIN_FIT, min_loo=core.MIN_LOO,
                 min_save=core.MIN_SAVE, ahead_m=float(session.cfg.waypoints.ahead_m), token=token)
 
@@ -89,9 +100,12 @@ def make_server(session, port=0):
         def local_request(self):
             return self.headers.get('Host') in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}')
 
+        def not_local(self):
+            return self.reply(403, {'error':f'http://127.0.0.1:{self.server.server_port} 또는 localhost 주소로만 열 수 있습니다.'})
+
         def do_GET(self):
             if not self.local_request():
-                return self.reply(403, {'error':'localhost only'})
+                return self.not_local()
             path = urlparse(self.path).path
             try:
                 if path in ('/', '/app.js'):
@@ -101,26 +115,37 @@ def make_server(session, port=0):
                     return self.reply(200, info)
                 if path == '/image/undistorted.png':
                     return self.reply(200, image, 'image/png')
-                self.reply(404, {'error':'not found'})
+                self.reply(404, {'error':'없는 주소입니다.'})
             except OSError as exc:
-                self.reply(400, {'error':str(exc)})
+                self.reply(400, {'error':f'파일을 읽을 수 없습니다: {exc.filename} ({exc.strerror})'})
 
         def do_POST(self):
-            if not self.local_request() or self.headers.get('X-Calibration-Token') != token:
-                return self.reply(403, {'error':'invalid local calibration token'})
+            if not self.local_request():
+                return self.not_local()
+            if self.headers.get('X-Calibration-Token') != token:
+                return self.reply(403, {'error':'토큰이 맞지 않습니다. 페이지를 새로 고치세요 (calibrate를 다시 실행하면 토큰이 바뀝니다).'})
             path = urlparse(self.path).path
             if path not in ('/api/fit', '/api/save'):
-                return self.reply(404, {'error':'not found'})
+                return self.reply(404, {'error':'없는 주소입니다.'})
             try:
-                size = int(self.headers.get('Content-Length', '0'))
+                try:
+                    size = int(self.headers.get('Content-Length', '0'))
+                except ValueError:
+                    size = 0
                 if not 0 < size <= 131072 or self.headers.get('Content-Type') != 'application/json':
                     raise ValueError('JSON 본문이 필요합니다 (Content-Type: application/json, 128 KiB 이하).')
-                points = parse_points(json.loads(self.rfile.read(size)), session)
+                try:
+                    value = json.loads(self.rfile.read(size))
+                except (ValueError, RecursionError):   # not JSON, not UTF-8, or nested too deep
+                    raise ValueError('본문이 올바른 JSON이 아닙니다 (UTF-8 JSON 객체를 보내세요).') from None
+                points = parse_points(value, session)
+                core.check_markers(session.source)   # an edited markers.yaml: restart, never fit or save stale markers
                 result, preview = fit(session, points)
                 if path == '/api/fit':
                     return self.reply(200, result)
-                data = core.build_calibration(intr, result, points, session.markers, session.source)   # refuses unless savable
-                saved, backup = core.save_calibration(data, session.out_path, preview)
+                with saving:   # one save at a time: backup names and temporaries are per file
+                    data = core.build_calibration(intr, result, points, session.markers, session.source)   # refuses unless savable
+                    saved, backup = core.save_calibration(data, session.out_path, preview)
                 self.reply(200, dict(saved=str(saved), backup=None if backup is None else str(backup), rms_cm=result['rms_cm']))
             except (KeyError, ValueError, TypeError, OSError) as exc:
                 self.reply(400, {'error':str(exc)})
@@ -128,7 +153,7 @@ def make_server(session, port=0):
         def log_message(self, *_):
             pass
 
-    return HTTPServer(('127.0.0.1', port), Handler)
+    return Server(('127.0.0.1', port), Handler)
 
 
 def serve(session, port=8765):
@@ -137,7 +162,7 @@ def serve(session, port=8765):
     except OSError as exc:
         raise OSError(f'포트 {port}를 열 수 없습니다 ({exc.strerror}). 실행 중인 calibrate/label을 끄거나 --port로 다른 포트를 지정하세요.') from exc
     print(f'지면 캘리브레이션: http://127.0.0.1:{server.server_port} (브라우저에서 열기)', flush=True)
-    print(f'저장 위치: {session.out_path} (기존 파일은 {session.out_path.parent/"old"}/로 옮김) · 종료: Ctrl+C', flush=True)
+    print(f'저장 위치: {session.out_path} (기존 파일은 {session.out_path.parent/"old"}/에 백업) · 종료: Ctrl+C', flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

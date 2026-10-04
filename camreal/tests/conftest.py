@@ -81,4 +81,4 @@ def ost(tmp_path):
 
 @pytest.fixture
 def markers():
-    return core.load_markers(TEMPLATE)
+    return core.load_markers(TEMPLATE)[0]

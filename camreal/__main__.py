@@ -63,13 +63,15 @@ def calibrate(args):
     c=load_course(args.config)
     from camreal.calibration import core
     from camreal.calibration.server import CalibrationSession, serve
-    if not Path(args.ost).expanduser().is_file():
-        raise FileNotFoundError(f'ost.yaml이 없습니다: {args.ost}. 1주차 결과를 그 위치에 두거나 '
-                                '--ost camreal/config/ost_reference_1920x1200.yaml로 기준 파일을 지정하세요.')
-    intr=core.read_ost(args.ost)
+    ost=Path(args.ost).expanduser()
+    if not ost.is_file():
+        option=core.reference_option(ost)
+        raise FileNotFoundError(f'ost.yaml이 없습니다: {args.ost}. 1주차 결과를 그 위치에 두세요'+(f' (또는 {option}로 기준 파일 지정).' if option else '.'))
+    intr=core.read_ost(ost)
     print(f'ost.yaml: {rel(intr.path)} ({core.ost_kind(intr.path)}) · {intr.width}x{intr.height}',flush=True)
     if args.image is not None:
-        source=Path(args.image).resolve()
+        source=Path(args.image).expanduser().resolve()
+        if not source.is_file():raise FileNotFoundError(f'이미지 파일이 없습니다: {rel(source)}')
         frame,stamp=core.read_image(source),None
         print(f'프레임: {rel(source)}',flush=True)
     else:
@@ -79,10 +81,11 @@ def calibrate(args):
             raise ValueError(f'bag을 읽으려면 ROS 2가 필요합니다 ({exc.name or exc} 없음). source /opt/ros/humble/setup.bash 후 다시 실행하거나 --image를 쓰세요.') from exc
         print(f'프레임: {rel(source)}의 {c["image_topic"]} 가운데 메시지 (stamp {stamp} ns)',flush=True)
     core.check_resolution(frame,intr)
-    if not Path(args.markers).is_file():
-        raise FileNotFoundError(f'마커 파일이 없습니다: {args.markers}. camreal/config/markers.yaml을 복사해 줄자로 잰 값으로 고치세요.')
-    markers=core.load_markers(args.markers)
-    print(f'마커: {rel(args.markers)} ({len(markers)}개)',flush=True)
+    markers_path=Path(args.markers).expanduser().resolve()
+    if not markers_path.is_file():
+        raise FileNotFoundError(f'마커 파일이 없습니다: {rel(markers_path)}. camreal/config/markers.yaml을 복사해 줄자로 잰 값으로 고치세요.')
+    markers,markers_sha256=core.load_markers(markers_path)   # the sha256 of the bytes parsed: save refuses a later edit
+    print(f'마커: {rel(markers_path)} ({len(markers)}개)',flush=True)
     model=Path(c['model'])
     if (model/'checkpoint.json').is_file():
         from camreal.checkpoint import load_config
@@ -93,7 +96,7 @@ def calibrate(args):
         cfg=config.load()
         print(f'BEV 규격: camsim 기본 설정 ({rel(model)}에 checkpoint.json이 없음)',flush=True)
     serve(CalibrationSession(intr,frame,core.undistort(frame,intr),markers,cfg,Path(c['calibration']),
-        dict(frame=str(source),frame_stamp_ns=stamp,markers=str(Path(args.markers).resolve()))),args.port)
+        dict(frame=str(source),frame_stamp_ns=stamp,markers=str(markers_path),markers_sha256=markers_sha256)),args.port)
 
 
 def run(args):
