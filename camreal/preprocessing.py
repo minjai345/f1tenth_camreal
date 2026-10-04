@@ -7,8 +7,9 @@ from camsim.render import ipm_bev, bev_size
 
 
 class CameraPreprocessor:
-    def __init__(self, calibration_path, cfg, training_mask, frame_id):
-        c = yaml.safe_load(Path(calibration_path).read_text())
+    def __init__(self, calibration, cfg, training_mask, frame_id):
+        # A path, or a calibration already loaded as a dict (calibrate's preview before saving).
+        c = calibration if isinstance(calibration, dict) else yaml.safe_load(Path(calibration).read_text())
         self.calibration_status = c.get('calibration_status', 'unspecified')
         if c['schema_version'] != 1 or c['distortion_model'] != 'plumb_bob':
             raise ValueError('requires schema 1, OpenCV plumb_bob calibration')
