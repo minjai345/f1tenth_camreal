@@ -4,7 +4,8 @@ import time
 import numpy as np
 import pytest
 from camsim.pure_pursuit import pure_pursuit
-from camsim_driver.runtime import FrameMailbox, WaypointFollower, valid_waypoint
+from camsim_driver import runtime
+from camsim_driver.runtime import FrameMailbox, WaypointFollower, calibration_problem, image_problem, valid_waypoint
 
 BAD = [[], [np.nan, 0], [1, np.inf], [-1, 0], [0, 0], [[1, 0], [2, 0]], [100, 0], [4.3, 4.3]]
 
@@ -184,3 +185,75 @@ def test_follower_rejects_bad_configuration(change):
 def test_mailbox_rejects_bad_configuration(args):
     with pytest.raises(ValueError):
         FrameMailbox(*args)
+
+
+def test_dark_or_uniform_view_is_flagged_inside_the_visible_region_only():
+    rng = np.random.default_rng(1)
+    mask = np.zeros((60, 76), bool)
+    mask[20:, 10:66] = True
+    floor = np.full((60, 76, 3), 128, np.uint8) + rng.integers(0, 3, (60, 76, 3), dtype=np.uint8)
+    taped = floor.copy()
+    taped[:, 38] = (0, 200, 220)   # one 5 cm tape line on a plain floor is enough texture
+    assert image_problem(taped, mask) is None
+    assert image_problem(rng.integers(0, 256, (60, 76, 3), dtype=np.uint8), mask) is None
+    covered = taped.copy()
+    covered[mask] = rng.integers(0, 8, (mask.sum(), 3))   # noisy black where the model looks
+    # covered lens, black frame, featureless floor, glare
+    for image in (covered, np.zeros_like(floor), floor, np.full_like(floor, 255)):
+        assert image_problem(image, mask).startswith('image too dark or uniform')
+    outside = np.zeros_like(taped)
+    outside[mask] = taped[mask]   # black outside the visible region does not count
+    assert image_problem(outside, mask) is None
+
+
+def test_follower_orders_by_the_newest_stamp_seen_even_if_rejected():
+    follow = follower()
+    assert follow.update([1., 0.], 10., 'rear_axle', 1., 10.)
+    assert not follow.update([np.nan, 0.], 10.1, 'rear_axle', 1.1, 10.1)
+    assert not follow.update([1., -.1], 10.05, 'rear_axle', 1.11, 10.11)   # late, older than the rejected one
+    assert follow.reason.startswith('non-increasing') and follow.command(1.12, 10.12) == (0., 0.)
+    assert not follow.update([1., 0.], 10.5, 'rear_axle', 1.12, 10.12)    # far future: rejected, blocks nothing
+    assert follow.update([1., 0.], 10.12, 'rear_axle', 1.12, 10.12)
+
+
+def test_follower_stops_on_nonfinite_steering(monkeypatch):
+    follow = follower()
+    assert follow.update([1., 0.], 10., 'rear_axle', 1., 10.)
+    monkeypatch.setattr(runtime, 'pure_pursuit', lambda *_: float('nan'))
+    assert follow.command(1.01, 10.01) == (0., 0.) and follow.reason == 'nonfinite steering'
+    monkeypatch.undo()
+    assert follow.command(1.02, 10.02) == (0., 0.)   # the waypoint was dropped
+
+
+def test_follower_block_holds_zero_and_drops_the_waypoint():
+    follow = follower()
+    assert follow.update([1., 0.], 10., 'rear_axle', 1., 10.)
+    assert follow.command(1.01, 10.01, '2 publishers on /waypoint') == (0., 0.)
+    assert follow.reason == '2 publishers on /waypoint'
+    assert follow.command(1.02, 10.02) == (0., 0.)   # never revived
+    assert follow.update([1., 0.], 10.03, 'rear_axle', 1.03, 10.03)
+    assert follow.command(1.04, 10.04)[0] == .5
+    with follow.lock:   # re-entrant: the node reads its clocks while holding it
+        assert follow.command(1.05, 10.05)[0] == .5
+
+
+@pytest.mark.parametrize('stamp,reason', [(np.nan, 'invalid'), (0., 'invalid'), (9.5, 'stale'),
+                                          (10.5, 'future'), (10., 'non-increasing')])
+def test_stamp_rejections_name_their_cause(stamp, reason):
+    box, follow = mailbox(), follower()
+    assert box.offer(None, 10., 1., 10.)
+    assert not box.offer(None, stamp, 1.01, 10.01)
+    assert box.reason.startswith(reason) and 'timestamp' in box.reason
+    assert follow.update([1., 0.], 10., 'rear_axle', 1., 10.)
+    assert not follow.update([1., 0.], stamp, 'rear_axle', 1.01, 10.01)
+    assert follow.reason.startswith(reason) and 'stamp' in follow.reason
+    if reason == 'non-increasing':   # the usual cause is a rewound bag or clock
+        assert '다시 시작' in box.reason and '다시 시작' in follow.reason
+
+
+def test_calibration_problem():
+    assert calibration_problem('measured abc', 'abc') is None
+    assert calibration_problem('unspecified abc', 'abc') is None   # older files without calibration_status
+    assert 'ASSUMED' in calibration_problem('assumed abc', 'abc')
+    assert 'differs' in calibration_problem('measured abd', 'abc')
+    assert 'differs' in calibration_problem('', 'abc')

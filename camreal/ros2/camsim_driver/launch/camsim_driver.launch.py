@@ -1,10 +1,10 @@
 """Run from the repository root:  ros2 launch camsim_driver camsim_driver.launch.py [drive_enabled:=true]"""
 import os
-import yaml
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from camsim_driver.params import read_vehicle_yaml
 
 
 def nodes(context):
@@ -12,17 +12,15 @@ def nodes(context):
     if not os.path.isfile(params):
         raise RuntimeError(f'params_file not found: {params}. Run from the repository root '
                            '(cd ~/f1tenth_gym) or pass params_file:=/absolute/path/vehicle.yaml')
-    with open(params) as stream:
-        data = yaml.safe_load(stream)
-    if isinstance(data, dict) and 'camsim_driver_node' in data:
-        raise RuntimeError(f'이전 형식의 vehicle.yaml입니다: {params}. camreal/ros2/camsim_driver/config/vehicle.yaml을 '
-                           'data/config/로 다시 복사하고 축간거리(wheelbase_m)를 채우세요.')
+    read_vehicle_yaml(params)   # old layout, typos, 1 for 1.0
     enabled = LaunchConfiguration('drive_enabled').perform(context).strip().lower() in ('true', '1', 'yes')
-    # Both nodes read the same /** section; only pure_pursuit_node gets the drive switch.
+    # Both nodes read the same /** section; only pure_pursuit_node gets the drive switch. While driving, its exit
+    # (wheelbase_m not set, ...) ends the launch instead of leaving perception up with no controller.
+    stop = dict(on_exit=Shutdown(reason='pure_pursuit_node exited')) if enabled else {}
     return [Node(package='camsim_driver', executable='waypoint_node', name='waypoint_node',
                  output='screen', parameters=[params]),
             Node(package='camsim_driver', executable='pure_pursuit_node', name='pure_pursuit_node',
-                 output='screen', parameters=[params, {'drive_enabled': enabled}])]
+                 output='screen', parameters=[params, {'drive_enabled': enabled}], **stop)]
 
 
 def generate_launch_description():

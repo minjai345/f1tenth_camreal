@@ -1,7 +1,12 @@
-"""ROS image conversion, the /waypoint hand-off between the two nodes, and visualization messages."""
+"""ROS image conversion, the hand-off between the two nodes, and visualization messages."""
 import numpy as np
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PointStamped, PoseStamped
+
+# waypoint_node's std_msgs/String '<calibration_status> <sha256 of the file>'; late subscribers get it too.
+CALIBRATION_TOPIC = '/camsim_driver/calibration'
+LATCHED = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 def decode_bgr8(bridge, message):

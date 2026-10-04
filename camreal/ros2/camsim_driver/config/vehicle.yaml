@@ -1,6 +1,7 @@
 # Instructor copies this to data/config/vehicle.yaml once per car.
 # Model, calibration and image topic are read from camreal_config (the students' data/camreal.yaml).
-# One section for both nodes: each declares only its own parameters and ignores the rest.
+# One section for both nodes: each declares only its own parameters and ignores the rest;
+# the launch file refuses names neither node declares (typos) and values typed unlike these defaults.
 /**:
   ros__parameters:
     # both nodes

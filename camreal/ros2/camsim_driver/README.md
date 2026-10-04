@@ -5,7 +5,8 @@
 ```text
 /flir_camera/image_raw ─▶ [waypoint_node] ─▶ /waypoint  (geometry_msgs/PointStamped)
                                          ├─▶ /predicted_path (nav_msgs/Path, RViz)
-                                         └─▶ /camsim_driver/bev (디버그 영상)
+                                         ├─▶ /camsim_driver/bev (디버그 영상)
+                                         └─▶ /camsim_driver/calibration (주행 켬인 pure_pursuit_node가 확인)
 /waypoint ─▶ [pure_pursuit_node] ─▶ /drive (ackermann_msgs/AckermannDriveStamped, drive_enabled일 때만)
                                          ─▶ ackermann_mux
 ```
@@ -23,6 +24,7 @@ lookahead는 학습 설정 `waypoints.ahead_m`(기본 1 m)이며 바꾸려면 �
 | `/waypoint` | waypoint_node | `header.stamp` = 원본 영상 촬영 시각, `header.frame_id` = `rear_axle`, `point.x`·`point.y` = waypoint(m), `point.z` = 0. 유효하고 신선한 예측만 |
 | `/predicted_path` | waypoint_node | `nav_msgs/Path`: 후륜축 (0,0) → waypoint. `/waypoint`와 같은 stamp, 같은 조건 |
 | `/camsim_driver/bev` | waypoint_node | 모델이 보는 BEV(긴 변 최대 400 px) + 1 m 원 + waypoint + 좌표·상태 글자 (기본 5 Hz) |
+| `/camsim_driver/calibration` | waypoint_node | `std_msgs/String` `<calibration_status> <SHA-256>`: 시작할 때 읽은 캘리브레이션 파일. 한 번 보내고(transient_local) 나중에 뜬 노드도 받는다 |
 | `/drive` | pure_pursuit_node | `drive_enabled:=true`일 때만. `ackermann_mux` navigation 입력 |
 
 ## 빌드
@@ -45,6 +47,8 @@ source install/setup.bash
 모델·캘리브레이션·영상 토픽은 학생 설정 `data/camreal.yaml`에서 읽는다.
 차량별 값은 `config/vehicle.yaml`을 `data/config/vehicle.yaml`로 복사해 채운다.
 파일은 `/**:` → `ros__parameters:` 한 섹션이고 두 노드가 같이 읽는다. 각 노드는 자기 파라미터만 선언하고 나머지는 무시한다.
+그래서 이름을 틀리면(`target_speed`) 그 값은 조용히 기본값이 된다. launch는 노드를 띄우기 전에 파일을 검사해
+이전 형식, 두 노드가 모르는 이름, 기본값과 형식이 다른 값(`0.33` 자리에 `1`)이면 멈춘다. `ros2 run`으로 따로 띄우면 이 검사가 없다.
 
 ```bash
 cd ~/f1tenth_gym
@@ -56,7 +60,7 @@ mkdir -p data/config && cp -n camreal/ros2/camsim_driver/config/vehicle.yaml dat
 
 | 파라미터 | 노드 | 의미 |
 |---|---|---|
-| camreal_config | 둘 다 | 기본 `data/camreal.yaml` (저장소 루트 기준 상대 경로). pure_pursuit_node는 `drive_enabled`일 때 캘리브레이션 상태만 본다 |
+| camreal_config | 둘 다 | 기본 `data/camreal.yaml` (저장소 루트 기준 상대 경로). pure_pursuit_node는 `drive_enabled`일 때 캘리브레이션 파일의 상태와 SHA-256만 본다 |
 | waypoint_topic | 둘 다 | 기본 `/waypoint` |
 | path_frame | 둘 다 | 후륜축 프레임 `rear_axle`. 다른 `frame_id`의 `/waypoint`는 거부 |
 | max_waypoint_m | 둘 다 | 이보다 먼 waypoint는 무효 → 정지 (3.0) |
@@ -67,7 +71,7 @@ mkdir -p data/config && cp -n camreal/ros2/camsim_driver/config/vehicle.yaml dat
 | image_qos_reliability | waypoint_node | 영상 구독 QoS. 기본 `best_effort` (KEEP_LAST 1) |
 | path_topic | waypoint_node | RViz 경로, 기본 `/predicted_path` |
 | debug_image_topic, debug_image_hz | waypoint_node | 디버그 BEV, `''`이면 끔 |
-| wheelbase_m | pure_pursuit_node | **필수 실측**. 기본 0은 시작 실패 |
+| wheelbase_m | pure_pursuit_node | **필수 실측**. 기본 0이면 pure_pursuit_node가 시작하지 않는다(주행 켬이면 launch도 끝남) |
 | steer_max_rad | pure_pursuit_node | 실제 조향 한계 |
 | target_speed_mps | pure_pursuit_node | 고정 목표 속도, 기본 0.5 |
 | waypoint_timeout_s | pure_pursuit_node | `/waypoint`의 최대 나이 (0.25 s). 넘으면 정지 |
@@ -88,6 +92,10 @@ mkdir -p data/config && cp -n camreal/ros2/camsim_driver/config/vehicle.yaml dat
 
 `calibration_status: assumed`(가정 캘리브레이션)이면 `drive_enabled:=true`에서 pure_pursuit_node가 시작을 거부한다.
 waypoint_node는 그대로 예측·시각화를 한다.
+주행 켬인 pure_pursuit_node는 waypoint_node가 `/camsim_driver/calibration`으로 알린 파일이 자기가 확인한 파일과
+같고(SHA-256) assumed가 아닐 때만 달린다. 알림 전에는 속도 0(`Control: waiting for waypoint_node calibration`),
+다르면 오류 로그와 속도 0이다(예: waypoint_node를 띄운 뒤 `calibrate`로 파일을 바꿈, 두 터미널의 작업 폴더가 다름).
+캘리브레이션을 바꾸면 두 노드를 함께 다시 시작한다(launch 다시).
 
 ## 실행
 
@@ -101,7 +109,8 @@ ros2 launch camsim_driver camsim_driver.launch.py drive_enabled:=true  # 주행 
 ```
 
 launch가 두 노드를 같은 `params_file`로 띄운다. 다른 경로의 차량 설정은 `params_file:=/절대경로/vehicle.yaml`로 지정한다.
-노드를 따로 띄울 때 (터미널 두 개):
+`drive_enabled:=true`에서 pure_pursuit_node가 끝나면(시작 실패 포함) launch 전체가 끝난다. 오류는 그 위에 있다.
+노드를 따로 띄울 때 (터미널 두 개, 둘 다 저장소 루트에서. vehicle.yaml 검사는 없다):
 
 ```bash
 ros2 run camsim_driver waypoint_node --ros-args --params-file data/config/vehicle.yaml
@@ -116,10 +125,13 @@ ros2 run rqt_graph rqt_graph   # /flir_camera/image_raw → /waypoint_node → /
 ros2 topic hz /waypoint        # 예측 주기
 ros2 topic echo /waypoint      # frame_id rear_axle, point.x ≈ 1 (m), point.y는 + 왼쪽, z = 0
 ros2 topic info /drive         # 주행 끔이면 Publisher count: 0 (mux가 없으면 Unknown topic), 주행 켬이면 1
+ros2 topic echo /camsim_driver/calibration --once   # data: measured <SHA-256>
 ```
 
-로그: waypoint_node는 상태가 바뀔 때 `Waypoint: valid` / 이유, 영상 timestamp가 잘못되면 `Image dropped`를,
-pure_pursuit_node는 `Control: valid` / `waypoint timeout` 등을 남긴다.
+로그: 상태가 바뀌면 남긴다(최대 1초에 한 번). waypoint_node는 `Waypoint: valid` / 이유(`image too dark or uniform` 등),
+영상 timestamp가 잘못되면 `Image dropped: invalid|stale|future|non-increasing image timestamp`를,
+pure_pursuit_node는 `Control: valid` / `waypoint timeout` / `2 publishers on /waypoint` 등을 남긴다.
+`non-increasing`이 계속되면 bag이나 시계가 되감긴 것이니 두 노드를 다시 시작한다.
 RViz는 Fixed Frame `rear_axle`에 Path `/predicted_path`(또는 PointStamped `/waypoint`). 다른 frame과 같이 보려면 실측한
 `base_link → rear_axle` 정적 TF를 발행한다(이미 있는 TF와 중복 금지, 임의의 0 오프셋 금지).
 
@@ -156,17 +168,26 @@ ros2 run tf2_ros static_transform_publisher --x "$REAR_X" --y 0 --z 0 \
 
 - 신선: 받은 뒤 경과(monotonic) ≤ `waypoint_timeout_s`, 그리고 −`future_tolerance_s` ≤ ROS 시각 − stamp ≤ `waypoint_timeout_s`.
   ROS 시각이 멈춰도(bag `--clock` 일시정지) monotonic 기준으로 멈춘다.
-- 거부: NaN/Inf, x ≤ 0, `max_waypoint_m`보다 먼 점, `frame_id` ≠ `path_frame`, stamp가 이전과 같거나 과거,
-  받을 때 이미 오래되었거나 미래인 stamp. 거부하면 들고 있던 waypoint도 버린다(즉시 0).
+- 거부: NaN/Inf, x ≤ 0, `max_waypoint_m`보다 먼 점, `frame_id` ≠ `path_frame`, stamp가 이전과 같거나 과거
+  (거부한 메시지의 stamp까지 포함), 받을 때 이미 오래되었거나 미래인 stamp. 거부하면 들고 있던 waypoint도 버린다(즉시 0).
+- `/waypoint` publisher가 둘 이상이면(waypoint_node를 두 번 띄움, `/waypoint`가 든 bag 재생) 하나만 남을 때까지 속도 0과 경고.
+  강제 종료(`kill -9`)된 publisher는 DDS에서 사라질 때까지 십수 초 동안 수에 남는다.
+- waypoint_node의 캘리브레이션 알림 전이거나 파일이 다르면 속도 0 (설정 절).
 
 waypoint_node는 다음 경우 `/waypoint`를 내지 않는다. 그러면 pure_pursuit_node가 timeout으로 멈춘다:
 영상 끊김, 잘못되었거나 오래된 영상 timestamp, 추론 오류, NaN/Inf·뒤쪽(x ≤ 0)·`max_waypoint_m`보다 먼 예측,
-추론이 끝났을 때 영상이 `input_timeout_s`보다 오래됨. waypoint_node가 죽어도 같다.
+추론이 끝났을 때 영상이 `input_timeout_s`보다 오래됨, 너무 어둡거나 균일한 영상(렌즈 가림, 불 꺼짐, 테이프 없는 바닥:
+학습 가시 영역의 채널별 평균이 모두 15 미만이거나 표준편차가 모두 4 미만. 이때는 모델을 돌리지 않는다). waypoint_node가 죽어도 같다.
 그래서 마지막 정상 영상의 촬영 시각부터 `waypoint_timeout_s` + 제어 주기(0.25 + 0.04 s) 안에 속도 0이 된다.
+**그 사이에는 마지막 유효 waypoint를 향해 계속 달린다**: 0.5 m/s면 최대 약 15 cm, 2 m/s면 약 60 cm.
+속도를 올리면 `waypoint_timeout_s`도 줄인다(노드 분리 전 단일 노드는 잘못된 영상 timestamp·추론 오류·무효 예측이면
+다음 제어 주기에 멈췄다).
 mux timeout에 정지를 맡기지 않는다. 정상 입력이 돌아오면 자동 재개된다.
 
-pure_pursuit_node를 Ctrl+C로 끄면(launch 종료 포함) 마지막으로 속도 0, 조향 0을 한 번 보낸다.
-프로세스 강제 종료·OS 정지에는 노드가 정지 명령을 보낼 수 없으므로 RB를 떼는 것(deadman)과
+pure_pursuit_node는 Ctrl+C(launch 종료 포함), `kill`(SIGTERM), 터미널 닫힘·SSH 끊김(SIGHUP), `Ctrl+\`(SIGQUIT)에,
+그리고 자기를 띄운 launch·`ros2 run`이 죽었을 때(launch에만 SIGTERM을 보내면 launch는 노드를 두고 먼저 끝난다)에도
+마지막으로 속도 0, 조향 0을 한 번 보낸다.
+pure_pursuit_node 자체의 `kill -9`, OS 정지, 전원 차단에는 정지 명령을 보낼 수 없으므로 RB를 떼는 것(deadman)과
 차량 E-stop을 반드시 함께 확인한다. 속도 0은 목표 속도이지 즉시 제동을 보장하지 않는다.
 
 ## 성능 (이 Jetson, 1920×1200 bayer_rggb8, ResNet-18, BEV 380×300, 2026-09-30)
@@ -191,8 +212,10 @@ CPU로는 주행할 수 없어서 `device: cuda`가 기본이다. onnxruntime의
    `/camsim_driver/bev`에서 waypoint가 차선 중앙 근처인지, 좌우 부호가 맞는지 확인. `ros2 topic info /drive`의 Publisher count는 0.
 3. `ros2 launch f1tenth_stack bringup_launch.py` → 주행 켬으로 launch → `ros2 topic info /drive --verbose`로 mux 구독 확인.
 4. **바퀴를 띄우고** `drive_enabled:=true` + RB → `/ackermann_cmd`, `/commands/servo/position`의
-   조향 방향(양수 = 좌회전)과 한계, 카메라를 가렸을 때 속도 0이 반복되는지, RB를 떼면 멈추는지,
-   launch를 Ctrl+C하면 속도 0으로 끝나는지 확인. 노드 분리 후 처음 달리는 차는 이 단계를 반드시 다시 한다.
+   조향 방향(양수 = 좌회전)과 한계, 렌즈를 손바닥·검은 천으로 **완전히** 가리면 0.3 s 안에 속도 0이 되고
+   `Waypoint: image too dark or uniform`이 나오는지(일부만 가리면 안 멈출 수 있다), 카메라 드라이버를 Ctrl+C로 끄거나
+   케이블을 뽑아도 속도 0인지(영상 끊김), RB를 떼면 멈추는지, launch를 Ctrl+C하면 속도 0으로 끝나는지 확인.
+   노드 분리 후 처음 달리는 차는 이 단계를 반드시 다시 한다.
 5. 넓은 공간에서 저속(0.5 m/s)으로 시작한다.
 
 ## 하드웨어 없는 검증
@@ -208,12 +231,19 @@ ROS가 없으면 ROS 테스트는 건너뛴다. 연결 테스트는 `/test/...` 
 2026-10-04 확인 결과 (두 노드, Docker `osrf/ros:humble` + Python 3.10, numpy 1.24, OpenCV 4.5):
 
 - 테스트 통과: FrameMailbox·WaypointFollower(만료, 잘못된 값, 시계 정지, 최신 프레임, 실패 epoch, 지연 worker,
-  frame_id 불일치, 같거나 과거·미래 stamp, 조향 = camsim `pure_pursuit`), `/waypoint` 메시지 변환,
-  두 노드를 한 프로세스에서 띄운 연결 시험(가짜 영상 → `/waypoint` → `/drive`, 영상 중단 후 0.5 s 안에 정지, 재개,
-  종료 시 마지막 0), 가정 캘리브레이션 주행 거부, 이전 형식 vehicle.yaml 거부.
+  frame_id 불일치, 같거나 과거·미래 stamp와 원인별 이유, 거부된 메시지까지 본 stamp 순서, NaN 조향, 조향 = camsim `pure_pursuit`),
+  어둡거나 균일한 영상 판정, vehicle.yaml 검사(이전 형식, 모르는 이름, 형식), `/waypoint` 메시지 변환,
+  두 노드를 한 프로세스에서 띄운 연결 시험(가짜 영상 → `/waypoint` → `/drive`, 영상 중단 후 마지막 영상 stamp부터
+  0.33 s 안에 정지, 재개, `/waypoint` publisher가 둘이면 정지, 종료 시 마지막 0), 검은 영상·뒤쪽 예측이면 `/waypoint` 없이 0만,
+  캘리브레이션 알림 전·불일치·assumed면 0만, 실행 파일에 SIGINT 두 번·SIGHUP·부모 SIGKILL이면 마지막 `/drive`가 0,
+  가정 캘리브레이션 주행 거부, 시작 오류가 파라미터 이름을 말함, launch가 `drive_enabled`를 pure_pursuit_node에만 넘기고
+  주행 켬이면 그 종료로 launch를 끝냄.
 - `colcon build` 후 launch: 가짜 영상 20 Hz → `/waypoint`(rear_axle, stamp = 영상 stamp) → `/drive` 0.5 m/s.
   영상을 끊으면 마지막 영상 stamp 기준 약 0.25 s 뒤 속도 0. Ctrl+C하면 마지막 `/drive`가 0.
   각 노드는 vehicle.yaml의 다른 노드 파라미터를 무시한다(`ros2 param get`으로 확인).
+  Ctrl+C, launch에만 SIGTERM, 프로세스 그룹에 SIGHUP 모두 마지막 `/drive`가 0이고 남은 노드 없음.
+  가짜 영상을 검게 바꾸면 마지막 정상 waypoint stamp부터 0.28 s 뒤 속도 0, 되돌리면 재개.
+  `wheelbase_m: 0.0` + 주행 켬이면 한국어 오류 뒤 launch가 끝나고, 주행 끔이면 인식만 계속. vehicle.yaml 오타는 시작 전에 거부.
 
 2026-09-28 확인 결과 (노드 분리 전 단일 노드):
 
