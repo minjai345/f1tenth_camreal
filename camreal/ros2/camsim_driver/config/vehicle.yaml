@@ -1,22 +1,27 @@
 # Instructor copies this to data/config/vehicle.yaml once per car.
 # Model, calibration and image topic are read from camreal_config (the students' data/camreal.yaml).
-camsim_driver_node:
+# One section for both nodes: each declares only its own parameters and ignores the rest.
+/**:
   ros__parameters:
+    # both nodes
     camreal_config: data/camreal.yaml  # relative to the repository root (launch from there)
+    waypoint_topic: /waypoint          # waypoint_node -> pure_pursuit_node (geometry_msgs/PointStamped)
+    path_frame: rear_axle
+    max_waypoint_m: 3.0                # reject waypoints farther than this (model aims at ahead_m)
+    future_tolerance_s: 0.02
+    # waypoint_node
     image_qos_reliability: best_effort # sensor QoS, volatile, KEEP_LAST depth 1
     path_topic: /predicted_path        # rear axle -> predicted waypoint, for RViz
-    drive_topic: /drive                # ackermann_mux navigation input
     debug_image_topic: /camsim_driver/bev  # BEV the model sees + waypoint; '' disables
     debug_image_hz: 5.0
     device: cuda                       # onnxruntime CUDA: ResNet-18 ~10 ms/frame on the Jetson. cpu is too slow to drive
     cpu_threads: 1                     # onnxruntime CPU threads
+    input_timeout_s: 0.25              # max image age when a waypoint is published
+    # pure_pursuit_node
+    drive_topic: /drive                # ackermann_mux navigation input
     control_hz: 25.0
-    input_timeout_s: 0.25
-    path_timeout_s: 0.25
-    future_tolerance_s: 0.02
+    waypoint_timeout_s: 0.25           # max /waypoint age; older -> speed 0
     target_speed_mps: 0.5              # constant; the model only gives the steering target
     wheelbase_m: 0.0                   # REQUIRED: measure; invalid until configured
     steer_max_rad: 0.30
-    max_waypoint_m: 3.0                # reject predictions farther than this (model aims at ahead_m)
-    path_frame: rear_axle
     drive_enabled: false               # launch argument drive_enabled:=true overrides

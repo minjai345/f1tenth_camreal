@@ -1,5 +1,3 @@
-import threading
-import time
 import cv2
 import numpy as np
 import pytest
@@ -9,84 +7,6 @@ from camsim import config, handoff, model, camera, render
 from camsim.dataset import to_tensor
 from camreal.checkpoint import load_model, training_mask
 from camsim_driver.preprocessing import CameraPreprocessor
-from camsim_driver.runtime import DriverState
-
-
-def state():
-    return DriverState(.25, .2, .02, .5, .3, .4, 6.)
-
-
-def test_pursuit_and_timestamp_expiry():
-    s = state()
-    s.offer('image', 10., 1., 10.)
-    frame = s.take()
-    assert s.complete(frame, [1., 1.], 1.01, 10.01)
-    speed, steer = s.command(1.02, 10.02)
-    # Pure pursuit straight at the waypoint: curvature 2y/L^2 = 1, steer = atan(wheelbase * 1).
-    assert speed == .5 and steer == pytest.approx(np.arctan(.3))
-    s.offer('new image', 10.19, 1.19, 10.19)  # no new inference: must expire old path
-    assert s.command(1.21, 10.21) == (0., 0.)
-    assert frame.stamp == 10.
-
-
-@pytest.mark.parametrize('wp', [[], [np.nan, 0], [1, np.inf], [-1, 0], [0, 0], [[1, 0], [2, 0]], [100, 0]])
-def test_bad_predictions_stop(wp):
-    s = state()
-    s.offer(None, 10., 1., 10.)
-    assert not s.complete(s.take(), wp, 1.01, 10.01)
-    assert s.command(1.02, 10.02) == (0., 0.)
-
-
-def test_input_loss_and_clock_pause():
-    s = state()
-    s.offer(None, 10., 1., 10.)
-    assert s.complete(s.take(), [1, 0], 1., 10.)
-    assert s.command(1.3, 10.) == (0., 0.)  # monotonic timeout even if ROS clock stalls
-
-
-def test_latest_only_and_failure_epoch():
-    s = state()
-    for i in range(10):
-        assert s.offer(i, 10. + i / 100, 1. + i / 100, 10. + i / 100)
-    frame = s.take()
-    assert frame.message == 9
-    s.fail(frame, 'network failed')
-    assert s.command(1.1, 10.1) == (0., 0.)
-    assert not s.complete(frame, [1, 0], 1.1, 10.1)
-    s.offer(11, 10.11, 1.11, 10.11)
-    assert s.complete(s.take(), [1, 0], 1.12, 10.12)
-    assert s.command(1.13, 10.13)[0] == .5
-
-
-@pytest.mark.parametrize('stamp', [0., 9., 11., np.nan, 10.])
-def test_invalid_timestamp_invalidates_running_result(stamp):
-    s = state()
-    s.offer(None, 10., 1., 10.)
-    frame = s.take()
-    assert not s.offer(None, stamp, 1.01, 10.01)
-    assert not s.complete(frame, [1, 0], 1.02, 10.02)
-    assert s.command(1.02, 10.02) == (0., 0.)
-
-
-def test_delayed_worker_does_not_block_control():
-    s = state()
-    s.offer(None, 10., 1., 10.)
-    entered, release = threading.Event(), threading.Event()
-    def worker():
-        frame = s.take()
-        entered.set()
-        release.wait(2.)
-        assert not s.complete(frame, [1, 0], 1.5, 10.5)
-    thread = threading.Thread(target=worker)
-    thread.start()
-    assert entered.wait(1.)
-    start = time.monotonic()
-    for _ in range(100):
-        assert s.command(1.4, 10.4) == (0., 0.)
-    assert time.monotonic() - start < .2
-    release.set()
-    thread.join(2.)
-    assert not thread.is_alive()
 
 
 @pytest.fixture
