@@ -22,7 +22,7 @@ lookahead는 학습 설정 `waypoints.ahead_m`(기본 1 m)이며 바꾸려면 �
 |---|---|---|
 | `/waypoint` | waypoint_node | `header.stamp` = 원본 영상 촬영 시각, `header.frame_id` = `rear_axle`, `point.x`·`point.y` = waypoint(m), `point.z` = 0. 유효하고 신선한 예측만 |
 | `/predicted_path` | waypoint_node | `nav_msgs/Path`: 후륜축 (0,0) → waypoint. `/waypoint`와 같은 stamp, 같은 조건 |
-| `/camsim_driver/bev` | waypoint_node | 모델이 보는 BEV(긴 변 최대 400 px) + 1 m 원 + waypoint + 좌표·상태 글자 (기본 5 Hz). 새 BEV가 `input_timeout_s` + 1/`debug_image_hz`(기본 0.45 s) 동안 없으면(영상 끊김·버림, 추론 오류) 마지막 화면을 회색으로 바꿔 이유와 경과 초를 적어 같은 주기로 보냄 (영상이 안 오면 `no image`, 영상은 오는데 추론이 멈추면 `inference stalled`) |
+| `/camsim_driver/bev` | waypoint_node | 모델이 보는 BEV(긴 변 최대 400 px) + 1 m 원 + waypoint + 좌표·상태 글자 (기본 5 Hz). 새 BEV가 `input_timeout_s` + 1/`debug_image_hz`(기본 0.45 s) 동안 없으면(영상 끊김·버림, 추론 오류) 마지막 화면을 회색으로 바꿔 경과 초와 이유를 적어 같은 주기로 보냄 (영상이 `input_timeout_s`보다 오래 안 오면 `no image`, 영상은 오는데 추론이 멈추면 `inference stalled`) |
 | `/drive` | pure_pursuit_node | `drive_enabled:=true`일 때만. `ackermann_mux` navigation 입력 |
 
 ## 빌드
@@ -193,8 +193,9 @@ pure_pursuit_node는 Ctrl+C(launch 종료 포함), `kill`(SIGTERM), 터미널 �
 그리고 자기를 띄운 launch·`ros2 run`이 죽었을 때(launch에만 SIGTERM을 보내면 launch는 노드를 두고 먼저 끝난다)에도
 마지막으로 속도 0, 조향 0을 한 번 보내고 구독자(mux)가 받았다고 응답할 때까지 최대 0.5 s 기다린다(부하가 크면 바로 끝나는
 프로세스의 마지막 메시지를 DDS가 버렸다). 그 뒤에 오는 Ctrl+C는 무시해 launch 로그에 `process has died`가 남지 않는다.
-두 노드의 실행 파일은 cv2·rclpy·onnxruntime을 import하기 전에 이 신호들을 받아 두므로(`spin.py`), 시작하는 중의 Ctrl+C나
-launch 종료에도 traceback 없이 끝난다.
+두 노드의 실행 파일(`scripts/`)은 다른 모듈보다 먼저 이 신호들을 받아 두므로(`spin.py`), 노드 모듈(cv2·rclpy·onnxruntime)을
+import하는 중의 Ctrl+C나 launch 종료에도 traceback 없이 끝난다. Python 자체가 뜨는 첫 순간의 Ctrl+C만 `KeyboardInterrupt`를
+남긴다(아직 아무것도 보내기 전이다).
 pure_pursuit_node 자체의 `kill -9`, OS 정지, 전원 차단에는 정지 명령을 보낼 수 없으므로 조이스틱 버튼에서 손을 떼는 것(deadman)과
 차량 E-stop을 반드시 함께 확인한다. 속도 0은 목표 속도이지 즉시 제동을 보장하지 않는다.
 
@@ -248,8 +249,9 @@ ROS가 없으면 ROS 테스트는 건너뛴다. 연결 테스트는 `/test/...` 
 - 테스트 통과: FrameMailbox·WaypointFollower(만료, 잘못된 값, 시계 정지, 최신 프레임, 실패 epoch, 지연 worker,
   frame_id 불일치, 같거나 과거·미래 stamp와 원인별 이유, 거부된 메시지까지 본 stamp 순서, NaN 조향, 조향 = camsim `pure_pursuit`,
   `reason`은 마지막 명령의 이유, BEV에 그리는 이유는 ASCII), vehicle.yaml 검사(이전 형식, 모르는 이름, 형식, `drive_enabled`),
-  영상이 끊기거나 추론이 실패·정지하면 BEV가 회색이 되고 이유(`no image`, `inference failure (ValueError)`, `inference stalled`)를 적음,
-  실행 파일이 import 중에 SIGINT·SIGTERM을 받으면 traceback 없이 exit code 0,
+  영상이 끊기거나 추론이 실패·정지하면 BEV가 회색이 되고 경과 초와 이유를 적음(영상이 끊기면 첫 회색 화면부터 `no image`,
+  `inference failure (ValueError)`, `inference stalled`), 실행 파일(`scripts/`)이 노드 모듈을 import하는 중에 SIGINT·SIGTERM을
+  받으면 traceback 없이 exit code 0(신호를 받아 두기 전에 import하는 것은 `camsim_driver.spin`뿐),
   `/waypoint` 메시지 변환, 두 노드를 한 프로세스에서 띄운 연결 시험(테이프 차선 영상 → `/waypoint` → `/drive`, 영상이 끊기면 정지,
   재개, `/waypoint` publisher가 둘이면 정지, 종료 시 마지막 0), 뒤쪽 예측이면 `/waypoint` 없이 0만, 마지막 0은 받았다는
   응답까지 기다림, 실행 파일에 SIGINT 두 번·끝날 때까지 SIGINT·처리 중에 겹친 SIGINT·SIGHUP·부모 SIGKILL이면 마지막

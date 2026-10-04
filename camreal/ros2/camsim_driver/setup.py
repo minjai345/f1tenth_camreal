@@ -14,6 +14,8 @@ setup(
     install_requires=['setuptools', 'numpy', 'PyYAML'],
     zip_safe=False, maintainer='camsim maintainers', maintainer_email='maintainers@example.com',
     description='Camera BEV waypoint inference (waypoint_node) and pure pursuit (pure_pursuit_node), ROS 2',
-    license='MIT', entry_points={'console_scripts': ['waypoint_node = camsim_driver.spin:waypoint_node',
-                                                     'pure_pursuit_node = camsim_driver.spin:pure_pursuit_node']},
+    license='MIT',
+    # Not console_scripts: their wrapper imports importlib.metadata (email, socket) and searches sys.path before
+    # spin.catch() takes the stop signals, and a Ctrl+C there raised KeyboardInterrupt.
+    scripts=['scripts/waypoint_node', 'scripts/pure_pursuit_node'],
 )

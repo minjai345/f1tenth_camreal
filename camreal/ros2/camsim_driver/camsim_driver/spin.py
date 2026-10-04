@@ -1,6 +1,6 @@
 """Process entry for both nodes: a stop signal only sets a flag, so destroy_node runs with a live context.
-The console scripts start here, before the node modules import cv2, rclpy and onnxruntime."""
-import ctypes
+The executables (scripts/) start here: until catch() has run, Ctrl+C raises KeyboardInterrupt, so only os and signal
+are imported before it (cv2, rclpy and onnxruntime come after)."""
 import os
 import signal
 
@@ -18,6 +18,7 @@ def catch():
     # or inside destroy_node (the second SIGINT it forwards); rclpy's shut the context down before the final stop.
     for signum in SIGNALS:
         signal.signal(signum, flag)
+    import ctypes   # after the handlers, like every other import
     # PR_SET_PDEATHSIG: a parent that dies without signalling us (ros2 launch after SIGTERM, SIGKILL) sends SIGTERM.
     parent = os.getppid()
     ctypes.CDLL(None).prctl(1, ctypes.c_ulong(signal.SIGTERM))

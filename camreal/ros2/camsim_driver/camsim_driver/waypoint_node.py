@@ -51,6 +51,7 @@ class WaypointNode(Node):
         self.last_image = self.last_debug
         if self.debug_pub is not None:   # the worker publishes no BEV for a dropped or failed frame
             self.debug_lock, self.stale_after = threading.Lock(), self.debug_period + p['input_timeout_s']
+            self.image_timeout = p['input_timeout_s']
             self.view = self.shrink(bev_view(np.full((*mask.shape, 3), self.cfg.lane.color_floor, np.uint8), self.cfg))
             self.create_timer(self.debug_period, self.publish_stale, clock=Clock(clock_type=ClockType.STEADY_TIME))
         qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
@@ -115,18 +116,19 @@ class WaypointNode(Node):
                             frame.message.header.stamp)
 
     def publish_stale(self):
-        """No new BEV (camera stopped, frames dropped, inference failing): the last one in grey, why and how long."""
+        """No new BEV (camera stopped, frames dropped, inference failing): the last one in grey, how long and why."""
         with self.debug_lock:
             now = time.monotonic()
             if now - self.last_debug <= self.stale_after:
                 return
             why = self.mailbox.reason
-            if now - self.last_image > self.stale_after:
+            if now - self.last_image > self.image_timeout:   # not stale_after: the last BEV may lag the last image
                 why = 'no image'
             elif why == 'valid':   # images arrive, the worker has returned nothing since
                 why = 'inference stalled'
             view = cv2.cvtColor(cv2.cvtColor(self.view, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
-            self.send_debug(title_bar(view, f'{why} | {now - self.last_debug:.1f} s'), self.get_clock().now().to_msg())
+            # The age first: a long reason runs off the 300 px BEV, the seconds students read must not.
+            self.send_debug(title_bar(view, f'{now - self.last_debug:.1f} s | {why}'), self.get_clock().now().to_msg())
 
     def send_debug(self, view, stamp):
         msg = self.bridge.cv2_to_imgmsg(view, encoding='bgr8')

@@ -271,6 +271,30 @@ def bev_titles(monkeypatch):
     return titles
 
 
+def grey_reasons(titles):
+    """'0.6 s | no image' -> 'no image'; the live titles start with the waypoint ('x 1.00 y +0.20 m | valid')."""
+    return [t.split(' | ', 1)[1] for t in titles if not t.startswith('x ')]
+
+
+def test_grey_bev_puts_the_age_first_and_tells_a_stopped_camera_from_a_stall(tmp_path, context, monkeypatch):
+    """The last BEV can be a debug period older than the last image: only the image age tells them apart.
+    The age comes first: a long reason runs off the 300 px BEV, the seconds students read must not."""
+    titles = bev_titles(monkeypatch)
+    model, cfg, _ = make_model_dir(tmp_path, constant_head, waypoints__norm_m=NORM)
+    perception = WaypointNode(context=context, parameter_overrides=params(
+        camreal_config=str(write_course(tmp_path, model, cfg)), device='cpu', waypoint_topic=WAYPOINT,
+        path_topic='/test/predicted_path', debug_image_topic=BEV))
+    perception.mailbox.reason = 'valid'
+    try:
+        for image_age, why in ((.3, 'no image'), (.2, 'inference stalled')):   # input_timeout_s 0.25
+            now = time.monotonic()
+            perception.last_debug, perception.last_image = now - .5, now - image_age
+            perception.publish_stale()
+            assert titles[-1] == f'0.5 s | {why}'
+    finally:
+        perception.destroy_node()
+
+
 def test_bev_greys_out_while_no_new_frame_comes(tmp_path, context, monkeypatch):
     """Students read the BEV title: a stopped camera must not leave the last 'valid' frame on screen."""
     titles = bev_titles(monkeypatch)
@@ -282,9 +306,13 @@ def test_bev_greys_out_while_no_new_frame_comes(tmp_path, context, monkeypatch):
     live = lambda start: [m for _, m in harness.since(harness.bevs, start) if not grey(m)]
     with spinning(context, [perception], harness):
         assert wait_for(lambda: live(0), 20.)
-        stopped = harness.stream(False)   # nothing invalidates the last frame: only its age can tell
+        # Stop between two BEVs (the last image is then newer than the last BEV). Nothing invalidates the last frame:
+        # only its age can tell.
+        time.sleep(max(0., harness.bevs[-1][0] + .15 - time.monotonic()))
+        stopped, shown = harness.stream(False), len(titles)
         assert wait_for(lambda: len(harness.since(harness.bevs, stopped)) >= 4 and grey(harness.bevs[-1][1]), 5.)
-        assert titles[-1].startswith('no image | ')
+        reasons = grey_reasons(titles[shown:])
+        assert reasons and set(reasons) == {'no image'}, reasons   # from the first grey frame on
         resumed = harness.stream(True)
         assert wait_for(lambda: live(resumed), 5.)
 
@@ -301,7 +329,7 @@ def test_grey_bev_never_says_valid_while_inference_stalls(tmp_path, context, mon
         try:
             assert wait_for(lambda: perception.mailbox.reason == 'valid', 20.)
             perception.predictor.predict = lambda bev: gate.wait(10.) and predict(bev)   # images keep coming
-            assert wait_for(lambda: titles and titles[-1].startswith('inference stalled | '), 5.)
+            assert wait_for(lambda: grey_reasons(titles[-1:]) == ['inference stalled'], 5.)
         finally:
             gate.set()
 
@@ -318,7 +346,7 @@ def test_bev_greys_out_when_inference_fails(tmp_path, context, monkeypatch):
         failing = time.monotonic()
         assert wait_for(lambda: len(harness.since(harness.bevs, failing)) >= 3, 5.)
         assert all(grey(m) for _, m in harness.bevs) and not harness.waypoints
-        assert titles[-1].startswith('inference failure (ValueError) | ')
+        assert grey_reasons(titles[-1:]) == ['inference failure (ValueError)']
 
 
 def test_final_zero_waits_until_subscribers_have_it(tmp_path, context):
@@ -403,21 +431,24 @@ def test_launch_checks_vehicle_yaml_and_gives_drive_only_to_the_controller(tmp_p
             launch_file.nodes(launch_context)
 
 
-def console_script(name):
-    """setup.py's console_scripts target ('module:function') of the executable ros2 run and ros2 launch start."""
-    setup = next(n for n in ast.walk(ast.parse((Path(__file__).resolve().parents[1]/'setup.py').read_text()))
+def executable(name):
+    """setup.py's scripts= file, installed as lib/camsim_driver/<name>: what ros2 run and ros2 launch start."""
+    package = Path(__file__).resolve().parents[1]
+    setup = next(n for n in ast.walk(ast.parse((package/'setup.py').read_text()))
                  if isinstance(n, ast.Call) and getattr(n.func, 'id', None) == 'setup')
-    scripts = ast.literal_eval(next(k.value for k in setup.keywords if k.arg == 'entry_points'))['console_scripts']
-    return next(target.strip() for script, target in (s.split('=') for s in scripts) if script.strip() == name)
+    scripts = ast.literal_eval(next(k.value for k in setup.keywords if k.arg == 'scripts'))
+    return str(package/next(s for s in scripts if Path(s).name == name))
 
 
-# What the installed script does with a console_scripts target (first argument); the rest is the node's argv.
-SCRIPT = '''
-import importlib, sys
-module, function = sys.argv.pop(1).split(":")
-sys.exit(getattr(importlib.import_module(module), function)())
+# Compiles the executable (first argument) to run it as its shebang line does; the rest is the node's argv.
+# The working directory (ROOT) provides camreal and camsim.
+LOAD = '''
+import sys
+path = sys.argv.pop(1)
+with open(path) as f:
+    code = compile(f.read(), path, "exec")
 '''
-CONTROLLER = [sys.executable, '-c', SCRIPT, console_script('pure_pursuit_node')]
+CONTROLLER = [sys.executable, '-c', LOAD + 'exec(code, {"__name__": "__main__"})', executable('pure_pursuit_node')]
 # Each line run inside the SIGINT handler raises the next SIGINT (6 at most): a handler that takes a lock, such as
 # threading.Event.set, deadlocks on the nested one.
 NESTING_CONTROLLER = [sys.executable, '-c', '''
@@ -438,27 +469,35 @@ sys.settrace(nest)
 main()
 ''']
 # A stop signal (first argument) while the node still imports cv2, rclpy and onnxruntime: ros2 launch stopping the
-# other node because pure_pursuit_node exited at startup, or an early Ctrl+C.
+# other node because pure_pursuit_node exited at startup, or an early Ctrl+C. Until spin.catch() takes the signals,
+# Python raises KeyboardInterrupt, so the executable imports nothing else first (setuptools' console-script wrapper
+# loaded importlib.metadata, email and socket and searched sys.path there).
 STARTING = '''
 import signal, sys
-signum = int(sys.argv.pop(1))
+signum, unguarded = int(sys.argv.pop(1)), []
 class Interrupt:
     def find_spec(self, name, path=None, target=None):
-        if name == "rclpy.node":
+        if signal.getsignal(signum) in (signal.default_int_handler, signal.SIG_DFL):
+            unguarded.append(name)
+        elif name == "rclpy.node":
             sys.meta_path.remove(self)
+            print("unguarded:", *unguarded, flush=True)
             signal.raise_signal(signum)
+''' + LOAD + '''
 sys.meta_path.insert(0, Interrupt())
-''' + SCRIPT
+exec(code, {"__name__": "__main__"})
+'''
 
 
 @pytest.mark.parametrize('signum', [signal.SIGINT, signal.SIGTERM])
 @pytest.mark.parametrize('name', ['waypoint_node', 'pure_pursuit_node'])
 def test_stop_signal_while_importing_ends_quietly(context, name, signum):
-    result = subprocess.run([sys.executable, '-c', STARTING, str(int(signum)), console_script(name)], cwd=ROOT,
+    result = subprocess.run([sys.executable, '-c', STARTING, str(int(signum)), executable(name)], cwd=ROOT,
                             capture_output=True, text=True, timeout=60,
                             env=dict(os.environ, ROS_DOMAIN_ID=str(context.get_domain_id())))
     output = result.stdout + result.stderr
     assert result.returncode == 0 and 'Traceback' not in output and '시작하지 못했습니다' not in output, output
+    assert 'unguarded: camsim_driver camsim_driver.spin\n' in output, output
 
 
 def test_startup_setting_error_prints_the_fix_without_a_traceback(context):

@@ -1,0 +1,4 @@
+#!/usr/bin/python3
+"""ros2 run and ros2 launch start this as lib/camsim_driver/pure_pursuit_node (a plain script: see setup.py)."""
+from camsim_driver.spin import pure_pursuit_node
+pure_pursuit_node()
