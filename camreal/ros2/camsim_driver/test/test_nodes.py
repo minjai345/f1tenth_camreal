@@ -50,7 +50,7 @@ ROOT = Path(__file__).resolve().parents[4]
 @pytest.fixture
 def context():
     context = Context()
-    # Linux-safe DDS ports outside the car ids 1-101 (CAR_STACK.md step 7): no car's /drive or /joy.
+    # Linux-safe DDS ports outside the car ids 1-101 (CAR_STACK.md step 10): no car's /drive or /joy.
     rclpy.init(context=context, domain_id=random.randint(215, 232))
     yield context
     rclpy.try_shutdown(context=context)

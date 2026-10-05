@@ -23,56 +23,34 @@ camsim이 바뀌면 받아 온다. 이 브랜치는 정태 레포(`jt` remote)�
 
 ```bash
 cd ~/f1tenth_gym
-git pull jt main     # camsim 업데이트. 그다음 colcon build 다시 (아래)
+git pull jt main     # camsim 업데이트. 그다음 주행 노드 다시 빌드 (CAR_STACK.md 7번)
 ```
 
 ## 수업 전 체크리스트
 
-### 1. ROS 패키지와 차량 스택
+### 1. 차 설치
 
-학생이 직접 설치할 때는 [차량 스택 설치 문서](CAR_STACK.md)를 따라 하게 한다(명령 복사로 끝나게 작성, 새 폴더 빌드로 검증함).
-차가 여러 대면 차마다 `ROS_DOMAIN_ID`를 다르게 둔다(CAR_STACK.md 7단계, 학생 문서 설치 4번). 같은 공유기에서 같은 ID면 다른 차의 `/drive`와
+차마다 [차 설치 문서](CAR_STACK.md)를 1번부터 순서대로 한다. 학생이 직접 설치할 때도 같은 문서다.
+설치 명령은 그 문서에만 둔다(여기에 다시 적지 않는다). 실차에서는 4~7번과 11번을 그 순서대로 해 봤다(맨 아래 "실차에서 확인한 것").
+차가 여러 대면 차마다 `ROS_DOMAIN_ID`를 다르게 둔다(CAR_STACK.md 10번). 같은 공유기에서 같은 ID면 다른 차의 `/drive`와
 `/joy`가 이 차를 움직이고, 주행 노드는 다른 차의 `/waypoint` 때문에 속도 0에 머문다.
 학생 문서는 차에 붙은 라벨을 읽게 하니 차마다 라벨 세 개를 붙인다.
 
-- 차 번호(1~101, 차마다 다르게): 설치 4번에서 `ROS_DOMAIN_ID`로 넣는 수. 조교가 설치할 때도 이 번호를 넣는다
+- 차 번호(1~101, 차마다 다르게): CAR_STACK.md 10번에서 `ROS_DOMAIN_ID`로 넣는 수
 - 카메라 serial: 0단계 launch의 `serial` 값(1주차 launch에 쓴 값 또는 SpinView)
 - 렌즈 높이: 4번의 5
 
-아래는 차량 스택 설치 문서의 요약이다.
+설치 문서에 적지 않은 배경:
 
-```bash
-sudo apt update && sudo apt install -y ros-humble-ackermann-msgs ros-humble-serial-driver ros-humble-urg-node \
-  ros-humble-control-msgs ros-humble-test-msgs ros-humble-rosbridge-server ros-humble-sick-scan-xd \
-  ros-humble-asio-cmake-module
-cd ~/f1tenth_ws && source /opt/ros/humble/setup.bash && colcon build
-```
-
-f1tenth_system(humble-devel)은 `~/f1tenth_ws/src/f1tenth_system`에 받아 두었다(submodule 포함).
-위 목록은 rosdep이 계산한 누락 의존성에 `asio-cmake-module`을 더한 것이다.
-`asio-cmake-module`은 rosdep이 잡지 못하지만 `vesc_driver` 빌드에 필요하다.
-apt가 "dpkg was interrupted"로 멈추면 먼저 `sudo dpkg --configure -a`를 실행한다. VESC·조이스틱 udev 규칙과 LiDAR 연결은
-[F1TENTH 문서](https://f1tenth.readthedocs.io)를 따른다(`vesc.yaml`의 port: `/dev/sensors/vesc`).
-
-주행 노드(`camsim_driver`) 빌드:
-
-```bash
-cd ~/f1tenth_gym
-source /opt/ros/humble/setup.bash
-colcon build --base-paths camreal/ros2/camsim_driver --packages-select camsim_driver
-```
-
-`camsim/`나 `camreal/`을 고친 뒤에도 다시 빌드한다(설치 시 복사됨).
-
-주행 노드는 GPU용 onnxruntime이 필요하다. 이 PC는 Jetson AI Lab 휠(onnxruntime-gpu 1.23.0, JetPack 6)을 쓴다.
-아래 출력에 `CUDAExecutionProvider`가 없으면 설치한다.
-
-```bash
-python3 -c "import onnxruntime as o; print(o.get_available_providers())"
-pip3 install "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/4eb/e6a8902dc7708/onnxruntime_gpu-1.23.0-cp310-cp310-linux_aarch64.whl#sha256=4ebe6a8902dc7708434b2e1541b3fe629ebf434e16ab5537d1d6a622b42c622b"
-```
-
-torch는 `export`(학생 7단계)에만 필요하다. 없으면 학생 문서 설치 3번의 휠을 설치한다.
+- CAR_STACK.md 2번 apt 목록의 `asio-cmake-module`은 rosdep이 잡지 못하지만 `vesc_driver` 빌드에 필요해서 넣었다.
+- onnxruntime-gpu 1.23.0과 torch 2.8.0은 Jetson AI Lab 휠(JetPack 6, CUDA 12.6)이다. 주행 노드는 GPU용 onnxruntime이 필요하지만
+  `camsim_driver`의 package.xml로 설치하지 않는다. torch는 `export`(학생 7단계)에만 필요하다.
+- `camsim/`나 `camreal/`을 고친 뒤에도 주행 노드를 다시 빌드한다(CAR_STACK.md 7번, 설치 시 복사됨).
+- 공식 `joy_teleop.yaml`은 F710 D 모드 기준이다(LB 4, RB 5, 조향은 축 2 = D 모드의 오른쪽 스틱 좌우). X 모드에서는 축 2가 LT라서
+  LB만 눌러도 조향이 끝까지 간다. 그래서 CAR_STACK.md 9번에서 D로 바꾼다. 조이스틱 장치는 `device_id: 0`(첫 조이스틱)으로 찾으니
+  `/dev/input/joypad-f710` 규칙은 필요 없다.
+- 조향 중립(`vesc.yaml`의 `steering_angle_to_servo_offset`)은 서보마다 달라 차마다 맞춘다(CAR_STACK.md 12번). 공식 기본값은 0.5304다.
+- VESC·조이스틱 외의 장치(LiDAR)는 [F1TENTH 문서](https://f1tenth.readthedocs.io)를 따른다. 이 실습에서는 안 쓴다.
 
 ### 2. 시뮬 모델 받기 (camsim 5장 산출물)
 
@@ -107,7 +85,7 @@ cp -n camreal/ros2/camsim_driver/config/vehicle.yaml data/config/vehicle.yaml
 두 노드가 이 파일 하나(`/**:`)를 같이 읽는다. launch는 모르는 이름, 기본값과 형식이 다른 값(`0.33` 자리에 `1`), `drive_enabled`가 있으면 멈춘다.
 이전 형식(`camsim_driver_node:`)이 남아 있으면 launch가 "이전 형식의 vehicle.yaml입니다" 오류를 낸다.
 `cp -n`은 덮어쓰지 않으니 `-n` 없이 다시 복사하고 값을 채운다.
-같은 wheelbase를 `~/f1tenth_ws/src/f1tenth_system/f1tenth_stack/config/vesc.yaml`의 odometry에도 넣는다.
+같은 wheelbase를 `~/f1tenth_ws/src/f1tenth_system/f1tenth_stack/config/vesc.yaml`의 odometry에도 넣고 `f1tenth_stack`을 다시 빌드한다(CAR_STACK.md 12번의 바퀴 중립과 같은 방법).
 학생은 `data/camreal.yaml`에서 `sessions`(4단계)와 `model`(8단계)만 바꾼다.
 `calibrate`도 이 파일을 읽는다. `calibration`은 저장 위치, `model`의 `checkpoint.json`은 BEV 미리보기 규격과 1 m(`ahead_m`)다
 (모델이 없으면 camsim 기본 설정으로 보여 주고 터미널에 그렇게 적는다).
@@ -184,7 +162,7 @@ python3 -m camreal.tools.make_assumed_calibration --out data/calibration/ASSUMED
 
 | 학생 단계 | 할 일 | 합격 기준 |
 |---|---|---|
-| 설치 5 | 확인 블록 | `ROS OK`, `GPU OK`, `camsim_driver`, `f1tenth_stack`, 차 번호 |
+| 설치 | 확인 블록 | `ROS OK`, `GPU OK`, `camsim_driver`, `f1tenth_stack`, 차 번호 |
 | 0 | 카메라, 1주차 파일 확인 | 영상 1920×1200. 1주차 `ost.yaml`도 1920×1200이면 1단계에 그 파일, 아니면(보통) 기준 파일 |
 | 1 | 지면 캘리브레이션 | A·B줄 마커 오차 3 cm 이하, 추정 카메라 높이 ≈ 줄자 값 (±2 cm), BEV 미리보기의 초록 십자가 테이프 십자 위 |
 | 2 | 직선 가운데에 똑바로 세우고 예측만 보기 | BEV에서 테이프 평행, 간격 = 실제 폭, `/waypoint` y ≈ 0 |
@@ -237,7 +215,7 @@ python3 -m camreal.tools.make_assumed_calibration --out data/calibration/ASSUMED
 ### 실습
 
 1. 조교 차로 주행(3단계)을 먼저 보여 준다. 조 안에서 역할(명령 입력, 화면 보고 기록, 차 옮기기, 정지 담당)을 나눈다.
-2. 학생 설치 확인(설치 5번)과 0~2단계. 1단계는 주차 칸에서 3초 기록할 때만 조별로 줄을 서고, 클릭은 자리에서 한다.
+2. 학생 설치 확인(설치의 확인 블록)과 0~2단계. 1단계는 주차 칸에서 3초 기록할 때만 조별로 줄을 서고, 클릭은 자리에서 한다.
    1단계가 막히면 저장하지 말고 넘어간다(사전 점검 때 만든 `car.yaml`이 그대로 쓰인다). 이미 저장했으면 `ls data/calibration/old/`에서
    파일 이름의 날짜·시각을 보고 학생이 저장하기 직전 것을 `cp data/calibration/old/car-날짜-시각.yaml data/calibration/car.yaml`로 되돌린다.
 3. 조교가 차마다 바퀴를 띄워 점검한다(사전 점검 표의 "3 전" 줄).
@@ -279,6 +257,16 @@ python3 -m camreal.tools.make_assumed_calibration --out data/calibration/ASSUMED
 
 테스트: `PYTHONPATH="$PWD/camreal/ros2/camsim_driver:$PYTHONPATH" python3 -m pytest -q camreal`
 
+차에서 돌릴 때는 두 가지가 다를 수 있다(실차가 둘 다 그랬다). 차에 pip로 깐 pytest(9 이상)가 있으면 ROS의 pytest 플러그인(`launch_testing`)과
+맞지 않아 `PluginValidationError`로 시작도 못 하고, 테스트용 모델을 만드는 `onnx`가 없다(수업에는 필요 없음). 차의 Python은 그대로 두고
+따로 둔 폴더로 돌린다.
+
+```bash
+pip3 install --target ~/camreal_testdeps --no-deps onnx==1.17.0 protobuf==4.25.5
+cd ~/f1tenth_gym && source /opt/ros/humble/setup.bash
+PYTHONPATH="$PWD/camreal/ros2/camsim_driver:$HOME/camreal_testdeps:$PYTHONPATH" python3 -m pytest -q -p no:launch_testing -p no:launch_ros camreal
+```
+
 ## 이 PC의 현재 상태 (2026-09-30)
 
 - 브랜치 `camreal` = 정태 레포 main(`264b632`, ResNet-18 + ONNX 전달) + camreal. 이전 작업은 `week3` 브랜치에 그대로 있다.
@@ -292,3 +280,14 @@ python3 -m camreal.tools.make_assumed_calibration --out data/calibration/ASSUMED
 - f1tenth_system: `~/f1tenth_ws`에 설치·빌드했다(11개 패키지). bringup은 뜨고, VESC·Hokuyo만 하드웨어가 없어 연결 오류가 난다.
   위 연결 검증은 임시 workspace에서 했다.
 - VESC·LiDAR·조이스틱은 이 PC에 연결되어 있지 않았다.
+
+## 실차에서 확인한 것 (2026-10-05)
+
+- Jetson Orin Nano, JetPack 6.2.3, Python 3.10, ROS 2 Humble, onnxruntime-gpu 1.23.0, numpy 1.26.4
+- CAR_STACK.md 4~7번과 11번을 그 순서대로 했다. torch 설치 2분 30초(내려받기 포함), 차량 스택 빌드 1분 13초, 주행 노드 빌드 2초.
+  2·3번과 8번의 규칙(ROS 패키지, onnxruntime-gpu, VESC 장치 규칙)은 이미 되어 있었다
+- 위 "차에서 돌릴 때" 명령으로 테스트 252개가 통과했다(1분)
+- 그 차의 조이스틱은 X 모드(`c21f`)로 꽂혀 있었다. `/joy`가 축 8개·버튼 11개였고 셋째 축(LT)이 1.0이었다. CAR_STACK.md 9번을 넣은 이유다
+- torch는 CUDA 행렬곱은 되지만 CUDA linalg(`torch.linalg.inv`)는 `libcusolver.so.11`에 없는 기호 오류로 안 된다. export 테스트는 차에서 통과했다
+- 이 날 하지 않은 것: 1번 clone(레포가 비공개라 다른 방법으로 받음), 2번 새 설치(이미 깔려 있었음), 8번 `/dev/sensors/vesc`(VESC가 꺼져 있었음),
+  9번 D 모드 전환과 그 뒤 `/joy` 번호·방향, 10번, 12번 전체(차량 스택 켜기, 조향 방향, 바퀴 중립)

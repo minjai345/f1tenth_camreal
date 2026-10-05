@@ -38,9 +38,9 @@ colcon build --base-paths camreal/ros2/camsim_driver --packages-select camsim_dr
 source install/setup.bash
 ```
 
-모델은 onnxruntime(GPU)으로 돌린다. PyTorch는 필요 없다. onnxruntime-gpu는 package.xml로 설치하지 않는다([INSTRUCTOR.md](../../INSTRUCTOR.md) 1단계).
+모델은 onnxruntime(GPU)으로 돌린다. PyTorch는 필요 없다. onnxruntime-gpu는 package.xml로 설치하지 않는다([CAR_STACK.md](../../CAR_STACK.md) 3번).
 
-수업에서는 여러 차가 한 공유기를 쓴다. 차마다 `ROS_DOMAIN_ID`(차 번호 1~101)를 다르게 둔다([CAR_STACK.md](../../CAR_STACK.md) 7단계).
+수업에서는 여러 차가 한 공유기를 쓴다. 차마다 `ROS_DOMAIN_ID`(차 번호 1~101)를 다르게 둔다([CAR_STACK.md](../../CAR_STACK.md) 10번).
 ID가 같으면 다른 차의 `/drive`와 `/joy`(조이스틱)가 이 차에 들어오고, pure_pursuit_node는 다른 차의 `/waypoint` 때문에
 속도 0에 머문다.
 

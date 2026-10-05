@@ -45,82 +45,10 @@ sessions:
 
 ## 설치 (차마다 한 번, 맨 처음)
 
-조교가 설치해 둔 차(수업 때는 보통 이쪽)는 맨 아래 [5. 확인](#5-확인)만 하고, 결과가 다르면 손 들기.
+조교가 설치해 둔 차(수업 때는 보통 이쪽)는 아래 확인만 하고, 결과가 다르면 손 들기.
+처음부터 설치할 때는 [차 설치 문서](CAR_STACK.md)를 1번부터 순서대로 (레포 받기, 패키지, 차량 스택·주행 노드 빌드, 차 번호, 조이스틱).
 
-1주차(ROS 2 Humble, 카메라 드라이버)와 2주차(onnxruntime-gpu, torch)에 깐 것 위에 아래만 더 깔면 됨. 위에서부터 순서대로, 모두 **T5**.
-
-### 1. 레포 받기
-
-**T5**
-
-```bash
-cd ~
-git clone https://github.com/minjai345/f1tenth_camreal.git f1tenth_gym
-```
-
-이미 `~/f1tenth_gym`이 있으면 `cd ~/f1tenth_gym && git remote -v`로 주소 확인. `minjai345/f1tenth_camreal`이면 `git pull`,
-다른 주소면 `mv ~/f1tenth_gym ~/f1tenth_gym_old` 후 위 명령.
-
-### 2. ROS 패키지
-
-1주차의 `ros-humble-desktop`에 없는 것만.
-
-**T5**
-
-```bash
-sudo apt update
-sudo apt install -y ros-humble-ackermann-msgs ros-humble-serial-driver ros-humble-asio-cmake-module \
-  ros-humble-urg-node ros-humble-control-msgs ros-humble-test-msgs ros-humble-rosbridge-server \
-  ros-humble-sick-scan-xd ros-humble-joy python3-colcon-common-extensions
-```
-
-`E: dpkg was interrupted`가 나오면 `sudo dpkg --configure -a` 후 다시.
-
-### 3. Python 패키지
-
-2주차에 이 차에서 설치했으면 이미 있음. 확인:
-
-**T5**
-
-```bash
-python3 -c "import onnxruntime as o; print(o.get_available_providers())"
-python3 -c "import torch; print(torch.__version__)"
-```
-
-첫 줄에 `CUDAExecutionProvider`가 없으면 설치 (주행에 필수).
-
-**T5**
-
-```bash
-pip3 install "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/4eb/e6a8902dc7708/onnxruntime_gpu-1.23.0-cp310-cp310-linux_aarch64.whl#sha256=4ebe6a8902dc7708434b2e1541b3fe629ebf434e16ab5537d1d6a622b42c622b"
-```
-
-둘째 줄이 `No module named 'torch'`면 설치 (7단계 데이터셋 만들기에만 필요).
-
-**T5**
-
-```bash
-pip3 install "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/62a/1beee9f2f1470/torch-2.8.0-cp310-cp310-linux_aarch64.whl#sha256=62a1beee9f2f147076a974d2942c90060c12771c94740830327cae705b2595fc"
-```
-
-### 4. 차량 스택, 주행 노드, 차 번호
-
-[차량 스택 설치 문서](CAR_STACK.md)의 0~6단계를 그대로 (설치 여부 확인, f1tenth_system 받기·빌드, 주행 노드 빌드, VESC 장치 이름 등록).
-
-그다음 차마다 ROS 도메인을 나눔 ([CAR_STACK.md](CAR_STACK.md) 7단계와 같음). 수업에서는 여러 차가 한 공유기를 써서,
-도메인이 같으면 다른 차의 `/drive`와 `/joy`(조이스틱)가 이 차를 움직임. 차에 붙은 차 번호(1~101)를 넣을 것.
-
-**T5**
-
-```bash
-read -p '차 번호(1~101): ' N && echo "export ROS_DOMAIN_ID=$N" >> ~/.bashrc
-```
-
-- `차 번호(1~101):`가 나오면 숫자만 치고 Enter (예: `3`)
-- 새 터미널부터 적용됨. 열려 있던 터미널은 모두 닫고 다시 열 것
-- 차마다 한 번만. 잘못 넣었으면 [차량 스택 문서의 문제 해결](CAR_STACK.md#문제-해결)
-
-### 5. 확인
+### 확인
 
 **T5** (새 터미널)
 
@@ -130,9 +58,9 @@ source /opt/ros/humble/setup.bash
 source ~/f1tenth_ws/install/setup.bash
 source install/setup.bash
 python3 -c "import rclpy, cv_bridge, rosbag2_py, ackermann_msgs.msg; print('ROS OK')"
-python3 -c "import onnxruntime as o; print('GPU OK' if 'CUDAExecutionProvider' in o.get_available_providers() else 'GPU 없음: 3번 다시')"
+python3 -c "import onnxruntime as o; print('GPU OK' if 'CUDAExecutionProvider' in o.get_available_providers() else 'GPU 없음: 차 설치 3번')"
 ros2 pkg list | grep -E "f1tenth_stack|camsim_driver"
-echo "차 번호: ${ROS_DOMAIN_ID:-없음 (4번 다시)}"
+echo "차 번호: ${ROS_DOMAIN_ID:-없음 (차 설치 10번)}"
 ```
 
 `ROS OK`, `GPU OK`, `camsim_driver`, `f1tenth_stack`, 그리고 차에 붙은 차 번호가 나오면 설치 끝.
@@ -351,7 +279,7 @@ ros2 launch camsim_driver camsim_driver.launch.py drive_enabled:=true
 - 멈추는 순서: 1) 버튼에서 손을 모두 떼기 → 2) 그래도 가면 정지 담당이 T3에서 Ctrl+C (속도 0을 보내고 꺼짐) →
   3) 그래도 안 되면 차를 들어 올리고 전원 스위치 끄기
 - 정지 담당은 주행 내내 T3 앞에 있을 것
-- 조이스틱이 끊기면 버튼 없이도 달림. 그래서 `/joy` 확인이 먼저
+- `/joy`(조이스틱 신호)가 끊기면 버튼 없이도 달림. 그래서 `/joy` 확인이 먼저
 - 노드가 알아서 속도 0을 보내는 경우: 영상이 끊기거나 오래됨, 예측점이 이상함(차 뒤쪽, 3 m보다 멂, 숫자가 아님),
   새 점이 0.25초 동안 안 옴. 멈추기 전까지 마지막 점을 향해 조금 더 감 (0.5 m/s면 약 15 cm)
 
@@ -446,7 +374,7 @@ python3 -m camreal export week3_real
 - 터미널에 세션별 평균, 최대 오차(cm)가 나옴. 3단계 메모와 비교
 - 어떤 조건에서 오차가 컸는지, 2주차 증강으로 막을 수 있었을지 생각해 보기
 - 같은 이름이 이미 있으면 `week3_real_v2`처럼 새 이름으로
-- `3/3` 다음에 `No module named 'torch'`가 나오면 설치 3번의 torch를 깔고 새 이름으로 다시
+- `3/3` 다음에 `No module named 'torch'`가 나오면 [차 설치 문서](CAR_STACK.md) 4번의 torch를 깔고 새 이름으로 다시
 
 ## 8. (각자) 실데이터로 학습해 보기
 
