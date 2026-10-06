@@ -6,6 +6,7 @@ so the same code runs on Colab, a laptop or the car.
 """
 import base64
 import csv
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -92,11 +93,12 @@ def sampler(every_s):
 def read_frames(bag, every_s=.5, topic=IMAGE_TOPIC):
     """One image per every_s seconds of camera time (header stamp), as [{'stamp_ns', 'bgr'}].
 
-    An image whose stamp is not later than the one before (a repeat, or the clock jumping back) is skipped and counted.
+    An image whose stamp is not later than the one before (a repeat, or the clock jumping back) is skipped and counted;
+    a bag where that is most images is an error.
     """
     from rosbags.typesys import Stores, get_typestore
     store, keep = get_typestore(Stores.ROS2_HUMBLE), sampler(every_s)
-    frames, last, skipped = [], None, 0
+    frames, last, skipped, total = [], None, 0, 0
     with _reader(bag) as reader:
         connections = [c for c in reader.connections if c.topic == topic]
         if not connections:
@@ -104,12 +106,16 @@ def read_frames(bag, every_s=.5, topic=IMAGE_TOPIC):
         for connection, _, raw in reader.messages(connections=connections):
             msg = store.deserialize_cdr(raw, connection.msgtype)
             stamp = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+            total += 1
             if last is not None and stamp <= last:
                 skipped += 1
                 continue
             last = stamp
             if keep(stamp):
                 frames.append(dict(stamp_ns=stamp, bgr=to_bgr(msg)))
+    if skipped * 2 > total:
+        raise ValueError(f'{topic} 영상 {total}개 중 {skipped}개의 시각(header stamp)이 앞 영상보다 늦지 않습니다. '
+                         '녹화 중에 시계가 바뀌었거나 카메라 드라이버가 시각을 찍지 않은 bag입니다.')
     if skipped:
         print(f'영상 시각(header stamp)이 앞 영상과 같거나 거꾸로 간 메시지 {skipped}개는 건너뜀.')
     if not frames:
@@ -133,8 +139,8 @@ def png_url(image):
 class Labeler:
     """Click labels for the BEVs of read_frames' frames: one point on the ahead_m circle, or 'rejected'.
 
-    Saved to JSON on every change with the frames' stamps: running the cell again keeps the clicks,
-    another bag (or another every_s) starts fresh.
+    Saved to JSON on every change with the frames' stamps and a digest of the BEVs: running the cell again keeps
+    the clicks, another bag, every_s or car.yaml starts fresh.
     """
 
     def __init__(self, frames, bevs, cfg, path):
@@ -142,13 +148,17 @@ class Labeler:
             raise ValueError(f'프레임 {len(frames)}장과 BEV {len(bevs)}장의 수가 다릅니다. BEV 셀부터 다시 실행하세요.')
         self.bevs, self.path = bevs, Path(path)
         self.stamps = [int(f['stamp_ns']) for f in frames]
+        digest = hashlib.sha1()
+        for bev in bevs:
+            digest.update(np.ascontiguousarray(bev))
+        self.bevs_sha1 = digest.hexdigest()
         self.ahead_m = float(cfg.waypoints.ahead_m)
         self.bev = dict(x_range_m=list(cfg.bev.x_range_m), y_range_m=list(cfg.bev.y_range_m),
                         resolution_m=float(cfg.bev.resolution_m))
         self.labels = [dict(status='unlabeled', waypoint_m=None) for _ in bevs]
         if self.path.exists():
             saved = json.loads(self.path.read_text())
-            if isinstance(saved, dict) and saved.get('stamps') == self.stamps:
+            if isinstance(saved, dict) and (saved.get('stamps'), saved.get('bevs_sha1')) == (self.stamps, self.bevs_sha1):
                 self.labels = saved['labels']
 
     def counts(self):
@@ -167,7 +177,7 @@ class Labeler:
         point = ring_point([x, y], self.ahead_m, self.bev).tolist() if status == 'accepted' else None
         self.labels[index] = dict(status=status, waypoint_m=point)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(dict(stamps=self.stamps, labels=self.labels), indent=1))
+        self.path.write_text(json.dumps(dict(stamps=self.stamps, bevs_sha1=self.bevs_sha1, labels=self.labels), indent=1))
         return dict(label=self.labels[index], counts=self.counts(), statuses=[label['status'] for label in self.labels])
 
     def _index(self, index):

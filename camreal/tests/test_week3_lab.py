@@ -101,6 +101,12 @@ def test_frames_whose_stamp_does_not_move_forward_are_skipped(tmp_path, capsys):
     assert '2개' in capsys.readouterr().out                     # the student sees that two images were dropped
 
 
+def test_a_bag_whose_stamps_mostly_stand_still_is_an_error(tmp_path):
+    pytest.importorskip('rosbags')
+    with pytest.raises(ValueError, match='40'):                  # a driver that never stamps: 39 of 40 would be dropped
+        lab.read_frames(write_bag(tmp_path/'bag', [0] * 40))
+
+
 def test_sampler_keeps_one_image_per_step():
     def kept(stamps, every_s=.5):
         keep = lab.sampler(every_s)
@@ -157,6 +163,9 @@ def test_saved_labels_come_back_only_for_the_same_frames(frames, bevs, tmp_path)
     assert again.labels == [ACCEPTED, REJECTED, dict(status='unlabeled', waypoint_m=None)]
     other_bag = [dict(f, stamp_ns=f['stamp_ns'] + 1) for f in frames[:3]]   # same number of frames, other images
     assert lab.Labeler(other_bag, bevs[:3], cfg, path).counts() == dict(accepted=0, rejected=0, unlabeled=3)
+    other_cal = [bev.copy() for bev in bevs[:3]]
+    other_cal[2][190, 150] += 1                                          # the same frames through another car.yaml
+    assert lab.Labeler(frames[:3], other_cal, cfg, path).counts() == dict(accepted=0, rejected=0, unlabeled=3)
     with pytest.raises(ValueError):
         lab.Labeler(frames[:2], bevs[:3], cfg, path)                   # BEVs of other frames
 
@@ -216,10 +225,14 @@ def test_dataset_is_what_week2_reads(frames, bevs, tmp_path):
 
 @pytest.mark.parametrize('accepted', [0, 2])
 def test_too_few_accepted_labels_leave_nothing_to_validate_on(bevs, tmp_path, accepted):
-    labels = [ACCEPTED] * accepted + [REJECTED] * (8 - accepted)
+    labels, out = [ACCEPTED] * accepted + [REJECTED] * (8 - accepted), tmp_path/'week3_real'
     with pytest.raises(ValueError):
-        lab.write_dataset(bevs[:8], labels, tmp_path/'week3_real')
-    assert not (tmp_path/'week3_real').exists()
+        lab.write_dataset(bevs[:8], labels, out)
+    assert not out.exists()
+    lab.write_dataset(bevs[:6], [ACCEPTED] * 6, out)
+    with pytest.raises(ValueError):
+        lab.write_dataset(bevs[:8], labels, out)
+    assert len(list((out/'images').iterdir())) == 6                      # the earlier dataset is kept
 
 
 def test_five_accepted_labels_give_the_notebook_a_validation_frame(bevs, tmp_path):
