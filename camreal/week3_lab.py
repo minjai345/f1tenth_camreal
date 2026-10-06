@@ -18,6 +18,7 @@ from camreal.labeling.core import LABEL_HEADER, ring_point
 from camreal.preprocessing import CameraPreprocessor
 
 IMAGE_TOPIC = '/flir_camera/image_raw'
+MIN_ACCEPTED = 5          # the notebook keeps 20 % of the dataset for validation: at least one frame
 SAMPLE = Path(__file__).resolve().parent/'sample'/'week3'
 LABELER_JS = Path(__file__).resolve().parent/'week3_labeler.js'
 # Same conversions cv_bridge uses (OpenCV names Bayer patterns one row down).
@@ -40,11 +41,23 @@ def to_bgr(msg):
     raise ValueError(f'{msg.encoding}: 지원하지 않는 영상 인코딩입니다 (bayer_*8, bgr8, rgb8, bgra8, rgba8, mono8).')
 
 
-def bag_summary(bag):
-    """Length and topics of a rosbag2 folder, the same facts `ros2 bag info` prints."""
+def _reader(bag):
+    """rosbags Reader for a bag folder, or for one .db3/.mcap file of it (Colab's file panel uploads files, not folders)."""
     from rosbags.rosbag2 import Reader
-    with Reader(Path(bag)) as reader:
-        return dict(duration_s=reader.duration / 1e9,
+    path = Path(bag)
+    if not path.exists():
+        raise ValueError(f'{path}: 없는 경로입니다. Colab 파일 창에 올린 파일은 /content/ 아래에 있습니다 (예: /content/my_run_0.db3).')
+    if path.is_dir() and not (path/'metadata.yaml').is_file():
+        raise ValueError(f'{path}: metadata.yaml이 없는 폴더입니다. bag 폴더나 그 안의 .db3 파일 하나를 지정하세요.')
+    return Reader(path)
+
+
+def bag_summary(bag):
+    """Files, length and topics of a bag (folder or one .db3 file), the same facts `ros2 bag info` prints."""
+    path = Path(bag)
+    with _reader(path) as reader:
+        return dict(files=sorted(p.name for p in path.iterdir()) if path.is_dir() else [path.name],
+                    duration_s=reader.duration / 1e9,
                     topics=[dict(topic=c.topic, type=c.msgtype, count=c.msgcount) for c in reader.connections])
 
 
@@ -77,12 +90,14 @@ def sampler(every_s):
 
 
 def read_frames(bag, every_s=.5, topic=IMAGE_TOPIC):
-    """One image per every_s seconds of camera time (header stamp), as [{'stamp_ns', 'bgr'}]."""
-    from rosbags.rosbag2 import Reader
+    """One image per every_s seconds of camera time (header stamp), as [{'stamp_ns', 'bgr'}].
+
+    An image whose stamp is not later than the one before (a repeat, or the clock jumping back) is skipped and counted.
+    """
     from rosbags.typesys import Stores, get_typestore
     store, keep = get_typestore(Stores.ROS2_HUMBLE), sampler(every_s)
-    frames, last = [], None
-    with Reader(Path(bag)) as reader:
+    frames, last, skipped = [], None, 0
+    with _reader(bag) as reader:
         connections = [c for c in reader.connections if c.topic == topic]
         if not connections:
             raise ValueError(f'{topic} 토픽이 bag에 없습니다. 있는 토픽: {sorted({c.topic for c in reader.connections})}')
@@ -90,10 +105,13 @@ def read_frames(bag, every_s=.5, topic=IMAGE_TOPIC):
             msg = store.deserialize_cdr(raw, connection.msgtype)
             stamp = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
             if last is not None and stamp <= last:
-                raise ValueError('영상 시각(header stamp)이 같거나 거꾸로 가는 메시지가 있습니다. 녹화를 확인하세요.')
+                skipped += 1
+                continue
             last = stamp
             if keep(stamp):
                 frames.append(dict(stamp_ns=stamp, bgr=to_bgr(msg)))
+    if skipped:
+        print(f'영상 시각(header stamp)이 앞 영상과 같거나 거꾸로 간 메시지 {skipped}개는 건너뜀.')
     if not frames:
         raise ValueError(f'{topic}에 영상 메시지가 없습니다.')
     return frames
@@ -113,18 +131,25 @@ def png_url(image):
 
 
 class Labeler:
-    """Click labels for a list of BEVs: one point on the ahead_m circle, or 'rejected'. Saved to JSON on every change."""
+    """Click labels for the BEVs of read_frames' frames: one point on the ahead_m circle, or 'rejected'.
 
-    def __init__(self, bevs, cfg, path):
+    Saved to JSON on every change with the frames' stamps: running the cell again keeps the clicks,
+    another bag (or another every_s) starts fresh.
+    """
+
+    def __init__(self, frames, bevs, cfg, path):
+        if len(frames) != len(bevs):
+            raise ValueError(f'프레임 {len(frames)}장과 BEV {len(bevs)}장의 수가 다릅니다. BEV 셀부터 다시 실행하세요.')
         self.bevs, self.path = bevs, Path(path)
+        self.stamps = [int(f['stamp_ns']) for f in frames]
         self.ahead_m = float(cfg.waypoints.ahead_m)
         self.bev = dict(x_range_m=list(cfg.bev.x_range_m), y_range_m=list(cfg.bev.y_range_m),
                         resolution_m=float(cfg.bev.resolution_m))
         self.labels = [dict(status='unlabeled', waypoint_m=None) for _ in bevs]
         if self.path.exists():
             saved = json.loads(self.path.read_text())
-            if len(saved) == len(bevs):          # same frames: keep earlier clicks when the cell is run again
-                self.labels = saved
+            if isinstance(saved, dict) and saved.get('stamps') == self.stamps:
+                self.labels = saved['labels']
 
     def counts(self):
         statuses = [label['status'] for label in self.labels]
@@ -142,7 +167,7 @@ class Labeler:
         point = ring_point([x, y], self.ahead_m, self.bev).tolist() if status == 'accepted' else None
         self.labels[index] = dict(status=status, waypoint_m=point)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.labels, indent=1))
+        self.path.write_text(json.dumps(dict(stamps=self.stamps, labels=self.labels), indent=1))
         return dict(label=self.labels[index], counts=self.counts(), statuses=[label['status'] for label in self.labels])
 
     def _index(self, index):
@@ -170,23 +195,29 @@ const d=r.data['application/json'];if(d.error)throw Error(d.error);return d}}</s
 
     def show(self, prefix='camreal.week3.'):
         """Colab only: register the page's two callbacks and draw the labeler in this cell's output."""
-        from IPython.display import HTML, JSON, display
+        from IPython.display import HTML, display
         try:
             from google.colab import output
         except ImportError:
             print('클릭 라벨링 화면은 Colab에서만 뜹니다 (google.colab 없음). Colab에서 이 노트북을 여세요.')
             return
-
-        def answer(method):
-            def callback(*args):
-                try:
-                    return JSON(method(*args))
-                except (ValueError, TypeError, IndexError) as exc:
-                    return JSON(dict(error=str(exc)))
-            return callback
-        output.register_callback(prefix + 'frame', answer(self.frame))
-        output.register_callback(prefix + 'save', answer(self.save))
+        output.register_callback(prefix + 'frame', _answer(self.frame))
+        output.register_callback(prefix + 'save', _answer(self.save))
         display(HTML(self.html(prefix)))
+
+
+def _answer(method):
+    """method as a Colab callback: its result as JSON, or {'error': message} the page shows for any exception."""
+    from IPython.display import JSON
+
+    def callback(*args):
+        try:
+            return JSON(method(*args))
+        except ValueError as exc:                  # our own checks, written for the student
+            return JSON(dict(error=str(exc)))
+        except Exception as exc:                   # anything else: the page cannot show a traceback, so name it
+            return JSON(dict(error=f'{type(exc).__name__}: {exc}'))
+    return callback
 
 
 def write_dataset(bevs, labels, out_dir, prefix='frame'):
@@ -194,6 +225,12 @@ def write_dataset(bevs, labels, out_dir, prefix='frame'):
 
     No car pose on a real recording, so x, y, theta are NaN (as camreal export writes them); training uses wp_x, wp_y.
     """
+    if len(labels) != len(bevs):
+        raise ValueError(f'BEV {len(bevs)}장과 라벨 {len(labels)}개의 수가 다릅니다. 라벨링 셀부터 다시 실행하세요.')
+    accepted = [i for i, label in enumerate(labels) if label['status'] == 'accepted']
+    if len(accepted) < MIN_ACCEPTED:
+        raise ValueError(f'승인한 프레임이 {len(accepted)}장입니다. 20%를 검증용으로 떼고 학습하려면 '
+                         f'{MIN_ACCEPTED}장 이상 점을 찍고 승인(Enter)하세요.')
     out = Path(out_dir)
     if out.exists():
         if any(p.name not in ('images', 'labels.csv') for p in out.iterdir()):
@@ -201,15 +238,10 @@ def write_dataset(bevs, labels, out_dir, prefix='frame'):
         shutil.rmtree(out)
     (out/'images').mkdir(parents=True)
     rows = []
-    for i, (bev, label) in enumerate(zip(bevs, labels)):
-        if label['status'] != 'accepted':
-            continue
-        name = f'{prefix}_{i:04d}.png'
-        cv2.imwrite(str(out/'images'/name), bev)
-        rows.append([name, 'nan', 'nan', 'nan', f'{label["waypoint_m"][0]:.4f}', f'{label["waypoint_m"][1]:.4f}'])
-    if not rows:
-        shutil.rmtree(out)
-        raise ValueError('승인한 라벨이 없습니다. 라벨링 칸에서 점을 찍고 승인(Enter)한 프레임만 데이터셋에 들어갑니다.')
+    for i in accepted:
+        name, (x, y) = f'{prefix}_{i:04d}.png', labels[i]['waypoint_m']
+        cv2.imwrite(str(out/'images'/name), bevs[i])
+        rows.append([name, 'nan', 'nan', 'nan', f'{x:.4f}', f'{y:.4f}'])
     with (out/'labels.csv').open('w', newline='') as stream:
         csv.writer(stream, lineterminator='\n').writerows([LABEL_HEADER, *rows])
     return len(rows)

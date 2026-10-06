@@ -2,7 +2,7 @@
 
 2주차에 시뮬로만 학습한 모델로 실차를 달려 보고, 실차 영상으로 학습용 데이터셋을 만듦.
 
-> **3주차 수업 실습은 [노트북](../notebooks/week3_bag_label_train.ipynb)으로 함 (Colab).** 레포에 들어 있는 예제 bag(`camreal/sample/week3/`)으로 rosbag 살펴보기 → BEV → 클릭 라벨링 → 2주차 형식 데이터셋 → 학습까지.
+> [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/minjai345/f1tenth_camreal/blob/main/notebooks/week3_bag_label_train.ipynb) **3주차 수업 실습은 [노트북](../notebooks/week3_bag_label_train.ipynb)으로 함 (Colab).** 레포에 들어 있는 예제 bag(`camreal/sample/week3/`)으로 rosbag 살펴보기 → BEV → 클릭 라벨링 → 2주차 형식 데이터셋 → 학습까지.
 > 아래 단계는 차에서 직접 녹화하고 라벨링할 때 씀.
 
 | 단계 | 할 일 | 결과 |
