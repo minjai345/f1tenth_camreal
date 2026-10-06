@@ -6,12 +6,14 @@
 |---|---|
 | infer_images | 실제 카메라 이미지(PNG/JPG)에 모델 예측을 그려 HTML로 보기. 주행 명령은 내지 않음 |
 | make_assumed_calibration | 실측 캘리브레이션이 없을 때 흐름 확인용 가정값 생성 (주행 불가) |
+| decimate_bag | 큰 카메라 bag을 N개 중 1개만 남겨 줄임 (차에서, ROS 필요). 40 Hz bag에 20이면 0.5초에 한 장. 3주차 노트북에 내 bag을 올릴 때 |
 
 ```bash
 cd ~/f1tenth_gym
 python3 -m camreal.tools.infer_images --input data/labeling/run_train/raw --out out/run_train_sim
 python3 -m camreal.tools.make_assumed_calibration --width 1920 --height 1200 \
   --out data/calibration/ASSUMED_camera.yaml
+python3 camreal/tools/decimate_bag.py data/bags/run_train data/bags/run_train_2hz 20
 ```
 
 `infer_images`는 모델·캘리브레이션을 `data/camreal.yaml`에서 읽는다. 다른 것을 쓰려면
